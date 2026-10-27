@@ -1,6 +1,6 @@
 # DESIGN — autodoc-orchestrator
 
-Orchestrator that points at a Go service (`catalog-poc`) and produces (1) project documentation and (2) swaggo annotations + a generated OpenAPI spec, without changing service behaviour.
+Orchestrator that points at any Go HTTP service (developed against `catalog-poc`) and produces (1) project documentation and (2) swaggo annotations + a generated OpenAPI spec, without changing service behaviour.
 
 **Stack:** Go · Google ADK for Go (`google.golang.org/adk/v2`, exact version pinned) · models behind one `llm.Provider`: a local open-weight model over an OpenAI-compatible API (default, Ollama + `qwen3:14b`) or Gemini via AI Studio (`AUTODOC_PROVIDER=gemini`; Flash for agents, Pro for the judge) · own JSONL trace.
 
@@ -28,55 +28,48 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 
 | Step | Kind | Responsibility | Tools |
 |---|---|---|---|
-| fetch | det | Clone the URL or local path (a local path is cloned too, so the original is never touched) into `runs/<id>/work`, branch `autodoc/<base-sha>`, baseline `go build/vet/test` (must be green, or the run stops), snapshot every file: SHA-256 + for `.go` files a code hash of the token stream without comments → `baseline.json` | git, go |
-| index | det | `go/ast` extraction → `facts.json` (see below) | — |
+| fetch | det | Clone the URL or local path (a local path is cloned too, so the original is never touched) into `runs/<id>/work`, branch `autodoc/<base-sha>`, baseline `go build` (must be green, or the run stops) and `go vet`, snapshot every file: SHA-256 + for `.go` files a code hash of the token stream without comments → `baseline.json` | git, go |
+| index | det | `go/ast` extraction → `facts.json` (see below); picks the command for the general API info: the one `main` package that registers a route or imports a package that does (`--main` overrides) | — |
 | strip | det | Remove every `// @…` / `//@…` line comment on its own line (tokenized, so strings are safe) from `.go` files, plus `swagger.json`/`.yaml` and a swag-generated `docs.go` in `internal/apispec/` → idempotent re-runs | — |
-| Swagger agent | LLM | swaggo `// @` annotations on the 3 handlers + general API info on `main` | `read_file`, `get_facts`, `patch_comment` |
+| Swagger agent | LLM | swaggo `// @` annotations on every route handler + general API info on that command's `main` | `read_file`, `get_facts`, `patch_comment` |
 | Gate A | det | See *Verification*; structured errors fed back to the agent | go, swag |
-| add route | det | Template-insert `GET /openapi.json` (see below) + a test for it | — |
+| add route | det | Template-insert `GET /openapi.json` (see below); checked by the orchestrator, no test added to the repo | — |
 | Docs agent | LLM | `docs/*.md`: overview, structure, request flow, business rules, error model, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (scoped to `docs/`) |
 | Gate B | det | See *Verification* | — |
 | Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | `read_file` |
 | commit | det | One separate commit on the branch; push / open MR only if a token is set; write run summary | git |
 
-CLI: `autodoc run --repo <url|path>` → working copy in a temp dir, output in `runs/<run-id>/`.
+CLI: `autodoc run --repo <url|path> [--main <file>] [--run-tests]` → working copy in a temp dir, output in `runs/<run-id>/`. Nothing about the target is configured: everything comes from its type-checked code.
 
-**`facts.json` — what `index` extracts** (tuned to the stdlib idioms catalog-poc uses):
-- Routes from `mux.HandleFunc("<METHOD> <pattern>", h.fn)`, Go 1.22 patterns incl. `{$}` (exact `/`) and `{id}`.
-- Inputs per handler: `r.PathValue("…")`, `query.Get("…")`; related constants (`defaultQty = 1`, `maxQty = 10`) and enums (`Currency` consts `RON|EUR|HUF`).
-- Outputs per handler: status + error code from every `writeError(w, http.StatusX, "code", …)`, response type from every `writeJSON` call, JSON fields of those types (incl. `omitempty`).
-- Implicit responses: unmatched path → `404` and wrong method → `405` from `ServeMux` as `text/plain`, not the JSON error envelope; panics → `500 internal` from `recoverPanics`.
-- Config: `envOr("PORT", "8080")`, server timeouts, Make targets, Dockerfile stages.
+**`facts.json` — what `index` extracts** (stdlib `net/http` idioms, matched by type, not by name):
+- Routes from `HandleFunc` / `Handle` with a constant Go 1.22 pattern, incl. `{$}` and `{id}`; the `main` packages and which of them serve the routes.
+- Inputs per handler: `r.PathValue("…")`, `url.Values.Get/Has("…")`; the constants it uses and their enum siblings.
+- Outputs: every call passing an `http.Status*` constant (handlers and middleware), with the string codes after it and the body type, followed one level into helpers (e.g. a `writeError`); JSON fields of those types (incl. `omitempty`).
+- Implicit responses: unmatched path → `404` and wrong method → `405` from `ServeMux` as `text/plain`.
+- Config: env reads (direct or via a helper like `envOr`), `http.Server` fields, Make targets, Dockerfile.
 
-**The extra route.** `GET /openapi.json` lets clients and tooling fetch the spec from the running service. Swag writes the spec into `internal/apispec/` next to a tiny `apispec.go` that `go:embed`s it — inside `internal/` because the Dockerfile copies only `go.mod`, `cmd/` and `internal/`, so a root-level `docs/` would not reach the image. `router.go` gains exactly one `mux.Handle("GET /openapi.json", apispec.Handler())` line + import. Template-inserted, not LLM-written; stdlib only (no swaggo runtime / http-swagger). This is the only intended behaviour change.
+**The extra route.** `GET /openapi.json` lets clients and tooling fetch the spec from the running service. Swag writes the spec into `internal/apispec/` next to a tiny `apispec.go` that `go:embed`s it — a package of the module, so it reaches any build or image that compiles the service. The file that registers the routes gains exactly one `mux.Handle("GET /openapi.json", apispec.Handler())` line + import. Template-inserted, not LLM-written; stdlib only (no swaggo runtime / http-swagger). This is the only intended behaviour change.
 
 ## Context strategy
 
 - **Swagger agent:** one ADK session, one turn per handler: the message carries its route facts, the types it writes (transitively), the constants it uses with their enum siblings and the handler source; the instruction holds the rules and a short swaggo cheat sheet. Then one turn for the general info on `main`; failed gate reports come back as further turns. Never sees docs. Small context → fewer hallucinated params.
-- **Docs agent:** `facts.json` + the verified spec as primary sources; `read_file` for details (`pricing.go`, `product.go`, `middleware.go`, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
+- **Docs agent:** `facts.json` + the verified spec as primary sources; `read_file` for details (the functions handlers call, middleware, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
 - **Judge:** one claim + its cited snippet per call. Cheap, focused, and the verdict is attributable to a specific line of code.
 - Deterministic steps pass artifacts (`facts.json`, spec, gate reports) — agents never get raw logs of earlier steps.
 
 ## Verification
 
 Deterministic (all must pass):
-- **Code unchanged — by construction:** `patch_comment` (file + func name, never a line number) only sets a function's `// @Name…` lines directly above its func line, after any doc comment; its earlier `// @` lines are replaced, so a retry can correct them. Anything else (other lines, test files, a code-hash change) is a tool error the agent sees and corrects (visible in the trace). Consequence: no struct tags, so no `example:` / `enums:` / `required` on response fields — parameter constraints go in `@Param` attributes instead (`Enums(RON,EUR,HUF) default(RON)`, `minimum(1) maximum(10) default(1)`).
-- **Code unchanged — after the fact:** the code hash of every `.go` file equals the baseline. It hashes the Go token stream with comments and layout dropped, so comments and formatting don't count but any change to code, identifiers, literals or struct tags does; the only allowed exceptions are the new `internal/apispec/` package and the exact expected one-line diff in `router.go`. A changed `.go` file must also equal its base-commit version once `// @` lines are stripped from both, so existing comments and layout stay. `go.mod` unchanged (no `go.sum` exists and none may appear).
-- **Build:** `go build ./...`, `go vet ./...`, `go test ./...` pass (`make check` covers only vet + test). `docker build` too, when Docker is available.
-- **Spec generation:** swag v1.16.6 via `go run` → Swagger 2.0: `swag init -g cmd/server/main.go --parseInternal --outputTypes json,yaml -o internal/apispec` (no `docs.go`, so no new dependency). Valid = Swagger 2.0 with title/version, every `$ref` resolves, YAML says the same as JSON; regenerating into a temp dir is byte-identical.
+- **Code unchanged — by construction:** `patch_comment` (file + func name, never a line number) only sets a function's `// @Name…` lines directly above its func line, after any doc comment; its earlier `// @` lines are replaced, so a retry can correct them. Anything else (other lines, test files, a code-hash change) is a tool error the agent sees and corrects (visible in the trace). Consequence: no struct tags, so no `example:` / `enums:` / `required` on response fields — parameter constraints go in `@Param` attributes instead (`Enums(a,b) default(a)`, `minimum(1) maximum(10)`).
+- **Code unchanged — after the fact:** the code hash of every `.go` file equals the baseline. It hashes the Go token stream with comments and layout dropped, so comments and formatting don't count but any change to code, identifiers, literals or struct tags does; the only allowed exceptions are the new `internal/apispec/` package and the exact expected one-line diff in the route-registering file. A changed `.go` file must also equal its base-commit version once `// @` lines are stripped from both, so existing comments and layout stay. `go.mod` unchanged (no `go.sum` exists and none may appear).
+- **Build:** the orchestrator's own checks, never the repo's scripts: `go build ./...` and `go vet ./...` (which compiles the tests without running them). A check green at the baseline must stay green; one already red (say, an existing vet finding) doesn't block. The repo's own tests run only with `--run-tests` and are reported, never blocking: they may need a database, network or secrets, and the code guard already proves no code changed.
+- **Spec generation:** swag v1.16.6 via `go run` → Swagger 2.0: `swag init -g <main file> --parseInternal --outputTypes json,yaml -o internal/apispec` (no `docs.go`, so no new dependency). Valid = Swagger 2.0 with title/version, every `$ref` resolves, YAML says the same as JSON; regenerating into a temp dir is byte-identical.
 - **Spec ↔ code grounding:** the same operations (`basePath` + path, method) and path/query params (path ones required) as `facts.json`, exactly the status codes each handler writes with the facts' body type, every error code named in its status's description, and definition properties = the types' JSON names — nothing invented, nothing missing. Defaults, enums and min/max are required by the instruction but not checked here: facts don't tie a param to its constants.
 - **Docs ↔ code grounding:** every referenced file, symbol, route, env var and Make target exists; every route, error code, query param, response field and business-rule constant in `facts.json` is mentioned.
-- **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the `router.go` line changed.
+- **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the one route line changed.
 
 Model-judged:
-- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a checklist of rules that are easy to get subtly wrong:
-  - money is integer RON bani; the discount rounds **down** (integer division); conversion happens only when the response is built;
-  - fixed indicative FX rates (1 RON = 0.2012 EUR = 79.45 HUF), rounded half away from zero to 2 / 2 / 0 decimals;
-  - `total` = discounted unit price × qty in bani, converted once (not converted unit price × qty);
-  - `GET /` always prices in RON; `list_price` / `discount_percent` appear only for discounted products;
-  - `in_stock` = stock > 0; `available` = stock ≥ qty; out-of-stock products still return 200; `qty` is capped at 10 regardless of stock;
-  - `currency` is case-insensitive and trimmed; validation order is id → currency → qty → lookup (an invalid qty on a missing id gives 400, not 404);
-  - access logs deliberately omit query strings and client IPs (GDPR) — a "safe to change" constraint.
+- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged.
 
 **On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git checkout -- .` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
@@ -95,8 +88,8 @@ Model-judged:
 ## Known limitations
 
 - The judge is a model: "good" is only as good as its fact-check; it can't judge readability or whether docs suit a new engineer.
-- `facts.json` extraction targets the stdlib idioms of this repo (`ServeMux` patterns, `query.Get`, `writeError`/`writeJSON`); other routers or helpers need new extractors.
-- Swagger 2.0 has no `oneOf`: `specs` (`any`, one of `LaptopSpecs` / `BookSpecs` / `ApparelSpecs` by category) is described as a free-form object plus a description. Swag v2 / OpenAPI 3.1 would fix this but is not stable.
+- `facts.json` extraction covers stdlib `net/http` (`ServeMux` patterns, `PathValue`, `url.Values`, `http.Status*` constants); routers like chi, gin or echo need their own extractors. Non-constant patterns, statuses or param names are missed.
+- Swagger 2.0 has no `oneOf`: a field typed `any` or an interface is described as a free-form object plus a description. Swag v2 / OpenAPI 3.1 would fix this but is not stable.
 - Comment-only edits mean no struct tags → no per-field examples or `required` markers on response schemas.
 - The `404`/`405` plain-text responses from `ServeMux` are documented in prose, not in the spec.
 - Business-rule coverage is checked against constants and a checklist, not semantics.
@@ -116,5 +109,4 @@ Model-judged:
 
 - Hard per-run token/cost budget value (TBD).
 - Push target for the deliverable run (fork vs local branch only).
-- `go.mod` says `go 1.22` while the Dockerfile builds with `golang:1.26`; the docs should state 1.22 as the minimum (needed for method/wildcard `ServeMux` patterns).
 - How AI coding assistants were used to build the orchestrator (to fill in at the end).

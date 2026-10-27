@@ -18,7 +18,8 @@ import (
 )
 
 const usage = `usage:
-  autodoc run   --repo <url|path> [--runs-dir runs]   document a repository
+  autodoc run   --repo <url|path> [--main <file>] [--run-tests] [--runs-dir runs]
+                                                      document a repository
   autodoc smoke [--dir .] [--runs-dir runs]           check the ADK + model wiring with one tool call
 `
 
@@ -59,6 +60,8 @@ func run(ctx context.Context, args []string) int {
 func cmdRun(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	repo := fs.String("repo", "", "git URL or local path of the service to document")
+	mainFile := fs.String("main", "", "file with the func main to document, relative to the repo root (default: the one command that serves the routes)")
+	runTests := fs.Bool("run-tests", false, "also run the repository's own tests and report the result; never blocks the run")
 	runsDir := fs.String("runs-dir", "runs", "directory for run traces and summaries")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -76,7 +79,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	}
 	defer rec.Close()
 	fmt.Println("run:", rec.RunID(), "trace:", rec.Dir())
-	res, err := pipeline.Run(ctx, cfg, rec, pipeline.Input{Repo: *repo})
+	res, err := pipeline.Run(ctx, cfg, rec, pipeline.Input{Repo: *repo, Main: *mainFile, RunTests: *runTests})
 	t := rec.Totals()
 	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d\n",
 		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens)
@@ -85,6 +88,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	}
 	fmt.Println("working copy:", res.Repo.Dir, "branch:", res.Repo.Branch)
 	fmt.Println("facts:", res.FactsPath)
+	fmt.Println("general API info:", res.Main)
 	fmt.Println("spec:", res.SpecDir)
 	fmt.Println("stopped after gate A: the remaining steps are not implemented yet")
 	return nil

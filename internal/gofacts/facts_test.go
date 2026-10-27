@@ -3,6 +3,7 @@ package gofacts
 import (
 	"context"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -20,8 +21,41 @@ func TestExtractModule(t *testing.T) {
 	if f.Module != "example.com/svc" || f.GoVersion != "1.22" {
 		t.Errorf("module = %q %q", f.Module, f.GoVersion)
 	}
-	if len(f.Packages) != 2 || f.Packages[1].Doc != "Package api is the HTTP layer of the test service." {
+	if len(f.Packages) != 3 || f.Packages[2].Doc != "Package api is the HTTP layer of the test service." {
 		t.Errorf("packages = %+v", f.Packages)
+	}
+}
+
+func TestExtractMains(t *testing.T) {
+	f := extractTestSvc(t)
+	want := []Main{
+		{Package: "example.com/svc/cmd/migrate", File: "cmd/migrate/main.go", Pos: "cmd/migrate/main.go:4"},
+		{Package: "example.com/svc/cmd/server", File: "cmd/server/main.go", Pos: "cmd/server/main.go:12", ServesRoutes: true},
+	}
+	if !reflect.DeepEqual(f.Mains, want) {
+		t.Errorf("mains = %+v, want %+v", f.Mains, want)
+	}
+	if got, err := f.Entrypoint(); got != "cmd/server/main.go" || err != nil {
+		t.Errorf("Entrypoint() = %q, %v", got, err)
+	}
+}
+
+func TestEntrypoint(t *testing.T) {
+	serving := func(files ...string) *Facts {
+		f := &Facts{Mains: []Main{{File: "cmd/tool/main.go"}}}
+		for _, file := range files {
+			f.Mains = append(f.Mains, Main{File: file, ServesRoutes: true})
+		}
+		return f
+	}
+	if got, err := serving("cmd/api/main.go").Entrypoint(); got != "cmd/api/main.go" || err != nil {
+		t.Errorf("one serving main: %q, %v", got, err)
+	}
+	if _, err := serving().Entrypoint(); err == nil || !strings.Contains(err.Error(), "--main") {
+		t.Errorf("no serving main: err = %v, want one naming --main", err)
+	}
+	if _, err := serving("cmd/a/main.go", "cmd/b/main.go").Entrypoint(); err == nil || !strings.Contains(err.Error(), "cmd/a/main.go, cmd/b/main.go") {
+		t.Errorf("two serving mains: err = %v, want one listing both", err)
 	}
 }
 

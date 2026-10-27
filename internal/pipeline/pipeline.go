@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"autodoc/internal/agents/swagger"
@@ -27,13 +28,16 @@ const swaggerAttempts = 3
 
 // Input is what a run is pointed at.
 type Input struct {
-	Repo string // git URL or local path
+	Repo     string // git URL or local path
+	Main     string // file with the func main to document; found from the facts when empty
+	RunTests bool   // also run the target's own tests; reported, never blocking
 }
 
 // Result is what a run leaves behind.
 type Result struct {
 	Repo      *repo.Repo
 	FactsPath string
+	Main      string // file that holds the general API info
 	SpecDir   string // the generated swagger.json and swagger.yaml, once gate A is green
 }
 
@@ -51,6 +55,7 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	res := &Result{}
 	workDir := filepath.Join(rec.Dir(), "work")
 	var snap guard.Snapshot
+	var baseChecks []verify.CheckResult
 	var facts *gofacts.Facts
 
 	err := step(rec, "fetch", func() (string, error) {
@@ -71,22 +76,26 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		if err != nil {
 			return "", fmt.Errorf("snapshot: %w", err)
 		}
-		checks := verify.GoChecks(ctx, workDir)
-		for _, c := range checks {
-			e := trace.Event{Type: trace.Gate, Step: "baseline", Detail: c.Cmd, LatencyMS: c.DurationMS}
-			if !c.OK {
-				e.Error = c.Output
-			}
-			rec.Emit(e)
-		}
-		if err := writeJSON(filepath.Join(rec.Dir(), "baseline.json"), Baseline{Repo: res.Repo, Checks: checks, Snapshot: snap}); err != nil {
+		baseChecks = verify.Checks(ctx, workDir, in.RunTests)
+		if err := writeJSON(filepath.Join(rec.Dir(), "baseline.json"), Baseline{Repo: res.Repo, Checks: baseChecks, Snapshot: snap}); err != nil {
 			return "", err
 		}
-		if !verify.AllOK(checks) {
-			// Without a green baseline, "still builds and passes after the run" proves nothing.
-			return "", fmt.Errorf("the target does not build, vet or test cleanly before any change; see baseline.json")
+		var status []string
+		for _, c := range baseChecks {
+			e := trace.Event{Type: trace.Gate, Step: "baseline", Detail: c.Cmd, LatencyMS: c.DurationMS}
+			result := "ok"
+			if !c.OK {
+				e.Error, result = c.Output, "fails"
+			}
+			rec.Emit(e)
+			status = append(status, c.Name+" "+result)
+			// Facts need type-checked code and swag needs it to parse. Every
+			// other check only has to stay as green as it is now.
+			if c.Name == "build" && !c.OK {
+				return "", fmt.Errorf("the target does not build before any change; see baseline.json")
+			}
 		}
-		return fmt.Sprintf("%d files fingerprinted; build, vet and test pass", len(snap.Files)), nil
+		return fmt.Sprintf("%d files fingerprinted; %s", len(snap.Files), strings.Join(status, ", ")), nil
 	})
 	if err != nil {
 		return res, err
@@ -102,8 +111,11 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		if err := writeJSON(res.FactsPath, facts); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%d routes, %d response sites, %d constants, %d types, %d env vars, %d tests",
-			len(facts.Routes), len(facts.Responses), len(facts.Constants), len(facts.Types), len(facts.Env), len(facts.Tests)), nil
+		if res.Main, err = entrypoint(facts, in.Main); err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("%d routes, %d response sites, %d constants, %d types, %d env vars, %d tests; general API info on %s",
+			len(facts.Routes), len(facts.Responses), len(facts.Constants), len(facts.Types), len(facts.Env), len(facts.Tests), res.Main), nil
 	})
 	if err != nil {
 		return res, err
@@ -119,7 +131,15 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	})
 	if err == nil {
 		err = step(rec, swagger.Step, func() (string, error) {
-			return annotate(ctx, cfg, rec, workDir, snap, facts)
+			return annotate(ctx, cfg, rec, verify.GateAInput{
+				Dir:        workDir,
+				Main:       res.Main,
+				Baseline:   snap,
+				BaseChecks: baseChecks,
+				RunTests:   in.RunTests,
+				Original:   func(rel string) ([]byte, error) { return repo.Show(ctx, workDir, "HEAD", rel) },
+				Facts:      facts,
+			})
 		})
 	}
 	if err != nil {
@@ -134,19 +154,13 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 
 // annotate runs the swagger agent and gate A, feeding each failed gate
 // report back to the agent in the same session, at most swaggerAttempts times.
-func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, workDir string, snap guard.Snapshot, facts *gofacts.Facts) (string, error) {
-	a, err := swagger.New(ctx, cfg, rec, workDir, facts)
+func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, in verify.GateAInput) (string, error) {
+	a, err := swagger.New(ctx, cfg, rec, in.Dir, in.Main, in.Facts)
 	if err != nil {
 		return "", err
 	}
 	if err := a.Annotate(ctx); err != nil {
 		return "", err
-	}
-	in := verify.GateAInput{
-		Dir:      workDir,
-		Baseline: snap,
-		Original: func(rel string) ([]byte, error) { return repo.Show(ctx, workDir, "HEAD", rel) },
-		Facts:    facts,
 	}
 	for attempt := 1; ; attempt++ {
 		start := time.Now()
@@ -176,6 +190,24 @@ func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, workD
 			return "", err
 		}
 	}
+}
+
+// entrypoint is the file with the func main that gets the general API info:
+// override when set, which must be one of the module's main packages, or
+// else the one command that serves the routes.
+func entrypoint(f *gofacts.Facts, override string) (string, error) {
+	if override == "" {
+		return f.Entrypoint()
+	}
+	override = filepath.ToSlash(filepath.Clean(override))
+	var files []string
+	for _, m := range f.Mains {
+		if m.File == override {
+			return override, nil
+		}
+		files = append(files, m.File)
+	}
+	return "", fmt.Errorf("--main %s: no func main there; the module's commands are in %s", override, strings.Join(files, ", "))
 }
 
 // step wraps fn in step_start / step_end trace events.

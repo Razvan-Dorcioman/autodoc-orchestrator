@@ -26,7 +26,6 @@ import (
 	"autodoc/internal/llm"
 	"autodoc/internal/tools"
 	"autodoc/internal/trace"
-	"autodoc/internal/verify"
 )
 
 // Step is the trace step name of the agent's calls.
@@ -83,14 +82,16 @@ type Agent struct {
 	r       *runner.Runner
 	rec     *trace.Recorder
 	dir     string
+	main    string // file with func main, for the general API info
 	facts   *gofacts.Facts
 	scope   *tools.PatchScope // limits patch_comment to the function of an annotate turn
 	session string
 }
 
 // New builds the agent with the read_file, get_facts and patch_comment tools,
-// all scoped to dir.
-func New(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir string, facts *gofacts.Facts) (*Agent, error) {
+// all scoped to dir. mainFile is the file with the func main that gets the
+// general API info.
+func New(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir, mainFile string, facts *gofacts.Facts) (*Agent, error) {
 	m, err := llm.NewModelChain(ctx, cfg.AgentModels, cfg.Provider, rec)
 	if err != nil {
 		return nil, err
@@ -135,7 +136,7 @@ func New(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir string
 	if err != nil {
 		return nil, err
 	}
-	return &Agent{r: r, rec: rec, dir: abs, facts: facts, scope: scope, session: rec.RunID() + "-" + Step}, nil
+	return &Agent{r: r, rec: rec, dir: abs, main: mainFile, facts: facts, scope: scope, session: rec.RunID() + "-" + Step}, nil
 }
 
 // maxNudges bounds how often one annotate turn is repeated after the agent
@@ -157,7 +158,7 @@ func (a *Agent) Annotate(ctx context.Context) error {
 			return fmt.Errorf("annotate %s: %w", r.Pattern, err)
 		}
 	}
-	if err := a.patchTurn(ctx, a.mainMessage(), verify.SwagMain, "main"); err != nil {
+	if err := a.patchTurn(ctx, a.mainMessage(), a.main, "main"); err != nil {
 		return fmt.Errorf("annotate main: %w", err)
 	}
 	return nil
@@ -254,7 +255,7 @@ func (a *Agent) mainMessage() string {
 @title, @version, @description and @BasePath. Read README.md and the package docs for the service name and
 what it does; keep the description to one or two sentences. For @version use the version README.md or the
 code declares; if there is none, use 1.0. @BasePath is / because the routes are registered at the root.`,
-		verify.SwagMain, verify.SwagMain)
+		a.main, a.main)
 }
 
 // shortName drops the package prefix facts.json puts on handler names:

@@ -19,7 +19,6 @@ import (
 const (
 	SwagVersion = "v1.16.6"
 	SwagModule  = "github.com/swaggo/swag/cmd/swag"
-	SwagMain    = "cmd/server/main.go" // file with the general API info
 )
 
 // Issue is one gate finding, phrased so the producing agent can act on it.
@@ -59,29 +58,33 @@ func (r Report) String() string {
 
 // GateAInput is what gate A checks the working copy against.
 type GateAInput struct {
-	Dir      string
-	Baseline guard.Snapshot                   // from baseline.json
-	Original func(rel string) ([]byte, error) // a file's content at the base commit
-	Facts    *gofacts.Facts
+	Dir        string
+	Main       string                           // file with func main and the general API info, relative to Dir
+	Baseline   guard.Snapshot                   // from baseline.json
+	BaseChecks []CheckResult                    // from baseline.json
+	RunTests   bool                             // also run the target's tests, as an advisory check
+	Original   func(rel string) ([]byte, error) // a file's content at the base commit
+	Facts      *gofacts.Facts
 }
 
-// Swag runs the pinned swag v1 in dir and writes swagger.json and
-// swagger.yaml into out (relative to dir, or absolute). No docs.go is
-// generated, so the target needs no swag dependency.
-func Swag(ctx context.Context, dir, out string) CheckResult {
+// Swag runs the pinned swag v1 in dir, reading the general API info from
+// main, and writes swagger.json and swagger.yaml into out (relative to dir,
+// or absolute). No docs.go is generated, so the target needs no swag
+// dependency.
+func Swag(ctx context.Context, dir, main, out string) CheckResult {
 	return runGo(ctx, dir, "swag", "run", SwagModule+"@"+SwagVersion,
-		"init", "-g", SwagMain, "--parseInternal", "--outputTypes", "json,yaml", "-o", out)
+		"init", "-g", main, "--parseInternal", "--outputTypes", "json,yaml", "-o", out)
 }
 
 // GateA generates the spec and checks the working copy: code unchanged, only
-// allowed files changed, build/vet/test green, the spec valid and
-// reproducible, and the spec in agreement with facts.json. Every check runs,
-// so one report lists every problem.
+// allowed files changed, no check that was green at the baseline now red,
+// the spec valid and reproducible, and the spec in agreement with
+// facts.json. Every check runs, so one report lists every problem.
 func GateA(ctx context.Context, in GateAInput) Report {
 	rep := Report{Gate: "A", Issues: []Issue{}}
 	add := func(is ...Issue) { rep.Issues = append(rep.Issues, is...) }
 
-	gen := Swag(ctx, in.Dir, strip.SpecDir)
+	gen := Swag(ctx, in.Dir, in.Main, strip.SpecDir)
 	rep.Checks = append(rep.Checks, gen)
 	if !gen.OK {
 		add(Issue{Check: "swag", Where: gen.Cmd, Message: "swag init failed; fix the annotation it names:\n" + gen.Output})
@@ -97,11 +100,10 @@ func GateA(ctx context.Context, in GateAInput) Report {
 		add(checkScope(in.Baseline, cur, in.Dir, in.Original)...)
 	}
 
-	for _, c := range GoChecks(ctx, in.Dir) {
-		rep.Checks = append(rep.Checks, c)
-		if !c.OK {
-			add(Issue{Check: "go", Where: c.Cmd, Message: c.Output})
-		}
+	checks := Checks(ctx, in.Dir, in.RunTests)
+	rep.Checks = append(rep.Checks, checks...)
+	for _, c := range Regressions(in.BaseChecks, checks) {
+		add(Issue{Check: "go", Where: c.Cmd, Message: c.Output})
 	}
 	return rep
 }
@@ -122,7 +124,7 @@ func checkGenerated(ctx context.Context, in GateAInput, rep *Report) []Issue {
 		return append(out, Issue{Check: "swag", Message: "temp dir: " + err.Error()})
 	}
 	defer os.RemoveAll(tmp)
-	again := Swag(ctx, in.Dir, tmp)
+	again := Swag(ctx, in.Dir, in.Main, tmp)
 	again.Name = "swag-regenerate"
 	rep.Checks = append(rep.Checks, again)
 	if !again.OK {

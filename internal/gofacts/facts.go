@@ -11,6 +11,7 @@ package gofacts
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/constant"
@@ -31,6 +32,7 @@ type Facts struct {
 	Module            string             `json:"module"`
 	GoVersion         string             `json:"go_version"`
 	Packages          []Package          `json:"packages"`
+	Mains             []Main             `json:"mains"`
 	Routes            []Route            `json:"routes"`
 	Responses         []ResponseSite     `json:"responses"` // every place a status is written, handlers and middleware
 	ImplicitResponses []ImplicitResponse `json:"implicit_responses"`
@@ -51,6 +53,14 @@ type Package struct {
 	Dir   string   `json:"dir"`
 	Files []string `json:"files"`
 	Doc   string   `json:"doc,omitempty"`
+}
+
+// Main is a command the module builds: a main package and its func main.
+type Main struct {
+	Package      string `json:"package"`
+	File         string `json:"file"`
+	Pos          string `json:"pos"`
+	ServesRoutes bool   `json:"serves_routes"` // registers a route or imports, directly or not, a package that does
 }
 
 type Route struct {
@@ -173,7 +183,7 @@ func Extract(ctx context.Context, root string) (*Facts, error) {
 		Fset:    fset,
 		Env:     append(os.Environ(), "GOWORK=off"),
 		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax |
-			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule,
+			packages.NeedTypes | packages.NeedTypesInfo | packages.NeedModule | packages.NeedImports,
 	}, "./...")
 	if err != nil {
 		return nil, fmt.Errorf("load packages: %w", err)
@@ -203,6 +213,7 @@ func Extract(ctx context.Context, root string) (*Facts, error) {
 	x.collectDecls(f)
 	f.Responses = x.responseSites()
 	f.Routes = x.routes(f.Responses)
+	f.Mains = x.mains(f.Routes)
 	f.ImplicitResponses = implicitResponses(f.Routes)
 	f.Env = x.env()
 	f.ServerSettings = x.serverSettings()
@@ -216,6 +227,78 @@ func Extract(ctx context.Context, root string) (*Facts, error) {
 		return nil, err
 	}
 	return f, nil
+}
+
+// Entrypoint returns the file declaring func main of the one command that
+// serves the routes: swag reads the general API info from there. It fails
+// when no command or more than one does.
+func (f *Facts) Entrypoint() (string, error) {
+	var files []string
+	for _, m := range f.Mains {
+		if m.ServesRoutes {
+			files = append(files, m.File)
+		}
+	}
+	switch len(files) {
+	case 1:
+		return files[0], nil
+	case 0:
+		return "", errors.New("no main package serves the routes, so there is no func main for the general API info; name its file with --main")
+	}
+	return "", fmt.Errorf("several main packages serve the routes (%s); name the one to document with --main", strings.Join(files, ", "))
+}
+
+// mains lists the main packages and whether each serves the routes.
+func (x *extractor) mains(routes []Route) []Main {
+	byPath := map[string]*packages.Package{}
+	pkgOf := map[string]string{} // repo-relative file -> import path
+	for _, p := range x.pkgs {
+		byPath[p.PkgPath] = p
+		for _, file := range p.GoFiles {
+			pkgOf[x.rel(file)] = p.PkgPath
+		}
+	}
+	routePkgs := map[string]bool{}
+	for _, r := range routes {
+		file, _, _ := strings.Cut(r.Registered, ":")
+		if p, ok := pkgOf[file]; ok {
+			routePkgs[p] = true
+		}
+	}
+	var reaches func(path string, seen map[string]bool) bool
+	reaches = func(path string, seen map[string]bool) bool {
+		if routePkgs[path] {
+			return true
+		}
+		p, ok := byPath[path] // only module packages: std and dependencies register no routes we know of
+		if !ok || seen[path] {
+			return false
+		}
+		seen[path] = true
+		for imp := range p.Imports {
+			if reaches(imp, seen) {
+				return true
+			}
+		}
+		return false
+	}
+
+	var out []Main
+	for _, p := range x.pkgs {
+		if p.Name != "main" {
+			continue
+		}
+		for _, file := range p.Syntax {
+			for _, d := range file.Decls {
+				if fd, ok := d.(*ast.FuncDecl); ok && fd.Recv == nil && fd.Name.Name == "main" {
+					pos := x.pos(fd.Pos())
+					rel, _, _ := strings.Cut(pos, ":")
+					out = append(out, Main{Package: p.PkgPath, File: rel, Pos: pos, ServesRoutes: reaches(p.PkgPath, map[string]bool{})})
+				}
+			}
+		}
+	}
+	return out
 }
 
 type funcDecl struct {

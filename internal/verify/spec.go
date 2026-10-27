@@ -13,6 +13,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"autodoc/internal/gofacts"
+	"autodoc/internal/strip"
 )
 
 // spec is the part of a Swagger 2.0 document the gate compares with facts.
@@ -51,7 +52,7 @@ const defsPrefix = "#/definitions/"
 // document whose references resolve, and that swagger.yaml says the same.
 func validateSpec(jsonData, yamlData []byte) []Issue {
 	issue := func(format string, args ...any) Issue {
-		return Issue{Check: "swag", Where: "internal/apispec/swagger.json", Message: fmt.Sprintf(format, args...)}
+		return Issue{Check: "swag", Where: strip.SpecDir + "/swagger.json", Message: fmt.Sprintf(format, args...)}
 	}
 	var s spec
 	if err := json.Unmarshal(jsonData, &s); err != nil {
@@ -78,7 +79,7 @@ func validateSpec(jsonData, yamlData []byte) []Issue {
 
 	var y any
 	if err := yaml.Unmarshal(yamlData, &y); err != nil {
-		return append(out, Issue{Check: "swag", Where: "internal/apispec/swagger.yaml", Message: "not valid YAML: " + err.Error()})
+		return append(out, Issue{Check: "swag", Where: strip.SpecDir + "/swagger.yaml", Message: "not valid YAML: " + err.Error()})
 	}
 	// Compare through JSON so YAML's int and JSON's float64 numbers agree.
 	yj, err := json.Marshal(y)
@@ -87,7 +88,7 @@ func validateSpec(jsonData, yamlData []byte) []Issue {
 		err = json.Unmarshal(yj, &fromYAML)
 	}
 	if err != nil || !reflect.DeepEqual(doc, fromYAML) {
-		out = append(out, Issue{Check: "swag", Where: "internal/apispec/swagger.yaml", Message: "does not describe the same document as swagger.json"})
+		out = append(out, Issue{Check: "swag", Where: strip.SpecDir + "/swagger.yaml", Message: "does not describe the same document as swagger.json"})
 	}
 	return out
 }

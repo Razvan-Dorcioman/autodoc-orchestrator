@@ -244,3 +244,19 @@ func TestReportString(t *testing.T) {
 		t.Errorf("String() = %q", got)
 	}
 }
+
+func TestRegressions(t *testing.T) {
+	base := []CheckResult{{Name: "build", OK: true}, {Name: "vet", OK: false}}
+	cur := []CheckResult{
+		{Name: "build", OK: false},                // green before: blocks
+		{Name: "vet", OK: false},                  // already red before: does not
+		{Name: "test", OK: false, Advisory: true}, // the target's own tests: never
+	}
+	var got []string
+	for _, c := range Regressions(base, cur) {
+		got = append(got, c.Name)
+	}
+	if !reflect.DeepEqual(got, []string{"build"}) {
+		t.Errorf("Regressions = %v, want [build]", got)
+	}
+}
