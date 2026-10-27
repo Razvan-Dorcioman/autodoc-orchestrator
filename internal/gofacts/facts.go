@@ -376,8 +376,8 @@ func typeName(t types.Type) string {
 	return types.TypeString(t, func(p *types.Package) string { return p.Name() })
 }
 
-// funcName is "Name" for functions and "(*Recv).Name" / "(Recv).Name" for methods.
-func funcName(fd *ast.FuncDecl) string {
+// FuncName is "Name" for functions and "(*Recv).Name" / "(Recv).Name" for methods.
+func FuncName(fd *ast.FuncDecl) string {
 	if fd.Recv == nil || len(fd.Recv.List) == 0 {
 		return fd.Name.Name
 	}
@@ -484,7 +484,7 @@ func (x *extractor) collectDecls(f *Facts) {
 			switch d := d.(type) {
 			case *ast.FuncDecl:
 				f.Functions = append(f.Functions, Function{
-					Name:      funcName(d),
+					Name:      FuncName(d),
 					Package:   p.Name,
 					Signature: x.src(d.Type),
 					Pos:       x.pos(d.Pos()),

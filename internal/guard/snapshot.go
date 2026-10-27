@@ -47,17 +47,23 @@ func Take(dir string) (Snapshot, error) {
 		if err != nil {
 			return err
 		}
-		sum := sha256.Sum256(data)
-		st := FileState{SHA256: hex.EncodeToString(sum[:])}
-		if strings.HasSuffix(rel, ".go") {
-			if st.CodeHash, err = CodeHash(rel, data); err != nil {
-				return err
-			}
-		}
-		s.Files[rel] = st
-		return nil
+		s.Files[rel], err = Fingerprint(rel, data)
+		return err
 	})
 	return s, err
+}
+
+// Fingerprint returns the state of a file at slash path rel with content data.
+func Fingerprint(rel string, data []byte) (FileState, error) {
+	sum := sha256.Sum256(data)
+	st := FileState{SHA256: hex.EncodeToString(sum[:])}
+	if strings.HasSuffix(rel, ".go") {
+		var err error
+		if st.CodeHash, err = CodeHash(rel, data); err != nil {
+			return FileState{}, err
+		}
+	}
+	return st, nil
 }
 
 // CodeHash hashes a Go file's token stream without comments or layout. Two

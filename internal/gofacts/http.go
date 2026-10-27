@@ -37,7 +37,7 @@ func (x *extractor) routes(sites []ResponseSite) []Route {
 			r.Registered = x.pos(call.Pos())
 			r.Handler = x.src(call.Args[1])
 			if h := x.handlerDecl(info, call.Args[1]); h != nil {
-				r.Handler = h.pkg.Name + "." + funcName(h.decl)
+				r.Handler = h.pkg.Name + "." + FuncName(h.decl)
 				r.HandlerPos = x.pos(h.decl.Pos())
 				x.analyzeHandler(&r, *h)
 				for _, s := range sites {
@@ -165,7 +165,7 @@ func (x *extractor) responseSites() []ResponseSite {
 			return
 		}
 		info := p.TypesInfo
-		owner := p.Name + "." + funcName(fd)
+		owner := p.Name + "." + FuncName(fd)
 		ast.Inspect(fd.Body, func(n ast.Node) bool {
 			call, ok := n.(*ast.CallExpr)
 			if !ok {

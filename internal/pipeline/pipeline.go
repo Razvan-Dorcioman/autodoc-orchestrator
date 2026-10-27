@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -17,6 +18,7 @@ import (
 	"autodoc/internal/gofacts"
 	"autodoc/internal/guard"
 	"autodoc/internal/repo"
+	"autodoc/internal/specroute"
 	"autodoc/internal/strip"
 	"autodoc/internal/trace"
 	"autodoc/internal/verify"
@@ -37,8 +39,9 @@ type Input struct {
 type Result struct {
 	Repo      *repo.Repo
 	FactsPath string
-	Main      string // file that holds the general API info
-	SpecDir   string // the generated swagger.json and swagger.yaml, once gate A is green
+	Main      string          // file that holds the general API info
+	Route     *specroute.Plan // where GET /openapi.json is registered
+	SpecDir   string          // the generated swagger.json and swagger.yaml, once gate A is green
 }
 
 // Baseline is the state of the working copy before any change: written to
@@ -107,6 +110,9 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		if err != nil {
 			return "", err
 		}
+		// A working copy that went through a run already serves the spec;
+		// that route is the template's, not one for the agents to document.
+		facts.Routes = slices.DeleteFunc(facts.Routes, specroute.Own)
 		res.FactsPath = filepath.Join(rec.Dir(), "facts.json")
 		if err := writeJSON(res.FactsPath, facts); err != nil {
 			return "", err
@@ -114,12 +120,21 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		if res.Main, err = entrypoint(facts, in.Main); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("%d routes, %d response sites, %d constants, %d types, %d env vars, %d tests; general API info on %s",
-			len(facts.Routes), len(facts.Responses), len(facts.Constants), len(facts.Types), len(facts.Env), len(facts.Tests), res.Main), nil
+		// Planned now so that a service the route template cannot handle
+		// fails before the agents run.
+		plan, err := specroute.PlanFor(workDir, facts)
+		if err != nil {
+			return "", fmt.Errorf("spec route: %w", err)
+		}
+		res.Route = &plan
+		return fmt.Sprintf("%d routes, %d response sites, %d constants, %d types, %d env vars, %d tests; general API info on %s; spec route: %s",
+			len(facts.Routes), len(facts.Responses), len(facts.Constants), len(facts.Types), len(facts.Env), len(facts.Tests), res.Main, plan), nil
 	})
 	if err != nil {
 		return res, err
 	}
+
+	original := func(rel string) ([]byte, error) { return repo.Show(ctx, workDir, "HEAD", rel) }
 
 	// From here on the working copy changes; on failure it goes back to the baseline.
 	err = step(rec, "strip", func() (string, error) {
@@ -137,8 +152,20 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 				Baseline:   snap,
 				BaseChecks: baseChecks,
 				RunTests:   in.RunTests,
-				Original:   func(rel string) ([]byte, error) { return repo.Show(ctx, workDir, "HEAD", rel) },
+				Original:   original,
 				Facts:      facts,
+			})
+		})
+	}
+	if err == nil {
+		err = step(rec, "add_route", func() (string, error) {
+			return addRoute(ctx, rec, verify.RouteInput{
+				Dir:        workDir,
+				Plan:       *res.Route,
+				Baseline:   snap,
+				BaseChecks: baseChecks,
+				RunTests:   in.RunTests,
+				Original:   original,
 			})
 		})
 	}
@@ -190,6 +217,32 @@ func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, in ve
 			return "", err
 		}
 	}
+}
+
+// addRoute writes the spec package, registers GET /openapi.json and checks
+// the result. The edit is a template, so a failed check is a bug or a
+// service the template does not fit: there is no agent to retry with.
+func addRoute(ctx context.Context, rec *trace.Recorder, in verify.RouteInput) (string, error) {
+	if err := specroute.Apply(in.Dir, in.Plan); err != nil {
+		return "", err
+	}
+	start := time.Now()
+	rep := verify.Route(ctx, in)
+	if err := writeJSON(filepath.Join(rec.Dir(), "route.json"), rep); err != nil {
+		return "", err
+	}
+	e := trace.Event{
+		Type: trace.Gate, Step: "route", LatencyMS: time.Since(start).Milliseconds(),
+		Detail: fmt.Sprintf("%d issue(s)", len(rep.Issues)),
+	}
+	if !rep.OK() {
+		e.Error = rep.String()
+	}
+	rec.Emit(e)
+	if !rep.OK() {
+		return "", fmt.Errorf("the spec route check failed (report in route.json):\n%s", rep)
+	}
+	return fmt.Sprintf("%s; served from %s", in.Plan, specroute.File), nil
 }
 
 // entrypoint is the file with the func main that gets the general API info:

@@ -90,7 +90,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	fmt.Println("facts:", res.FactsPath)
 	fmt.Println("general API info:", res.Main)
 	fmt.Println("spec:", res.SpecDir)
-	fmt.Println("stopped after gate A: the remaining steps are not implemented yet")
+	fmt.Println("spec route:", res.Route)
+	fmt.Println("stopped after adding the spec route: the docs agent, gate B, judge and commit are not implemented yet")
 	return nil
 }
 

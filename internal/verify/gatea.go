@@ -141,13 +141,14 @@ func checkGenerated(ctx context.Context, in GateAInput, rep *Report) []Issue {
 	return append(out, checkSpec(jsonData, in.Facts)...)
 }
 
-// checkCode proves the code did not change: every .go file keeps its
-// baseline code hash, go.mod is untouched and no go.sum appears.
+// checkCode proves the code did not change: every .go file outside the
+// generated spec package keeps its baseline code hash, go.mod is untouched
+// and no go.sum appears.
 func checkCode(base, cur guard.Snapshot) []Issue {
 	var out []Issue
 	for _, rel := range sortedKeys(cur.Files) {
 		b, ok := base.Files[rel]
-		if ok && strings.HasSuffix(rel, ".go") && cur.Files[rel].CodeHash != b.CodeHash {
+		if ok && strings.HasSuffix(rel, ".go") && !strings.HasPrefix(rel, strip.SpecDir+"/") && cur.Files[rel].CodeHash != b.CodeHash {
 			out = append(out, Issue{Check: "code", Where: rel, Message: "the code changed, not only comments: only '// @' comment lines may be added"})
 		}
 	}
