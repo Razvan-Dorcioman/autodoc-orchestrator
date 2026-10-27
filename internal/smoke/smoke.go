@@ -1,4 +1,4 @@
-// Package smoke runs one tiny agent end to end: a Gemini model, the read_file
+// Package smoke runs one tiny agent end to end: the configured model, the read_file
 // tool and the trace hooks. It proves the wiring before the real agents exist.
 package smoke
 
@@ -41,7 +41,7 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir string
 }
 
 func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir, step string) (string, error) {
-	m, err := llm.NewModelChain(ctx, cfg.AgentModels, cfg.APIKey, rec)
+	m, err := llm.NewModelChain(ctx, cfg.AgentModels, cfg.Provider, rec)
 	if err != nil {
 		return "", err
 	}

@@ -1,4 +1,5 @@
-// Package llm wires Gemini models and ADK agent callbacks into the run trace.
+// Package llm wires models (Gemini or a local OpenAI-compatible server) and ADK
+// agent callbacks into the run trace.
 package llm
 
 import (
@@ -13,20 +14,53 @@ import (
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/model/gemini"
+	"google.golang.org/adk/v2/model/openaimodel"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 
 	"autodoc/internal/trace"
 )
 
-// NewModel returns a Gemini model through AI Studio. Transient API errors are
-// retried with backoff, and each retry is recorded in rec.
-func NewModel(ctx context.Context, name, apiKey string, rec *trace.Recorder) (model.LLM, error) {
-	m, err := gemini.NewModel(ctx, name, &genai.ClientConfig{
-		APIKey:     apiKey,
-		Backend:    genai.BackendGeminiAPI,
-		HTTPClient: &http.Client{Transport: newRetryTransport(rec, name)},
-	})
+// Provider kinds.
+const (
+	ProviderGemini = "gemini" // Gemini through AI Studio
+	ProviderLocal  = "local"  // open-weight model behind an OpenAI-compatible server (Ollama, llama.cpp, LM Studio, vLLM)
+)
+
+// Provider says which API serves the models and how to reach it.
+type Provider struct {
+	Kind    string
+	APIKey  string        // required for gemini; optional for local servers
+	BaseURL string        // local only, e.g. http://localhost:11434/v1
+	Timeout time.Duration // per HTTP attempt; zero means the default
+}
+
+// NewModel returns a model from p. Transient API errors are retried with
+// backoff, and each retry is recorded in rec.
+func NewModel(ctx context.Context, name string, p Provider, rec *trace.Recorder) (model.LLM, error) {
+	client := &http.Client{Transport: newRetryTransport(rec, name, p.Timeout)}
+	var (
+		m   model.LLM
+		err error
+	)
+	switch p.Kind {
+	case ProviderGemini:
+		m, err = gemini.NewModel(ctx, name, &genai.ClientConfig{
+			APIKey:     p.APIKey,
+			Backend:    genai.BackendGeminiAPI,
+			HTTPClient: client,
+		})
+	case ProviderLocal:
+		// Chat Completions, not the Responses API: that is what local servers implement.
+		m, err = openaimodel.NewModel(ctx, name, &openaimodel.ClientConfig{
+			APIKey:     p.APIKey,
+			BaseURL:    p.BaseURL,
+			HTTPClient: client,
+			API:        openaimodel.APIChatCompletions,
+		})
+	default:
+		return nil, fmt.Errorf("unknown model provider %q", p.Kind)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create model %s: %w", name, err)
 	}
@@ -34,10 +68,10 @@ func NewModel(ctx context.Context, name, apiKey string, rec *trace.Recorder) (mo
 }
 
 // NewModelChain returns the models in names, in order, behind a Fallback.
-func NewModelChain(ctx context.Context, names []string, apiKey string, rec *trace.Recorder) (*Fallback, error) {
+func NewModelChain(ctx context.Context, names []string, p Provider, rec *trace.Recorder) (*Fallback, error) {
 	models := make([]model.LLM, 0, len(names))
 	for _, name := range names {
-		m, err := NewModel(ctx, name, apiKey, rec)
+		m, err := NewModel(ctx, name, p, rec)
 		if err != nil {
 			return nil, err
 		}

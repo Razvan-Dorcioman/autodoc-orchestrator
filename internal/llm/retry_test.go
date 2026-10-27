@@ -26,7 +26,7 @@ func TestRetryTransport(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rec.Close()
-	rt := newRetryTransport(rec, "m")
+	rt := newRetryTransport(rec, "m", 0)
 	var waits []time.Duration
 	rt.sleep = func(d time.Duration) { waits = append(waits, d) }
 
@@ -64,7 +64,7 @@ func TestRetryTransportGivesUp(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rec.Close()
-	rt := newRetryTransport(rec, "m")
+	rt := newRetryTransport(rec, "m", 0)
 	rt.sleep = func(time.Duration) {}
 
 	resp, err := (&http.Client{Transport: rt}).Get(srv.URL)
@@ -94,7 +94,7 @@ func TestRetryTransportTimesOut(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer rec.Close()
-	rt := newRetryTransport(rec, "m")
+	rt := newRetryTransport(rec, "m", 0)
 	rt.timeout = 100 * time.Millisecond
 	rt.sleep = func(time.Duration) {}
 
@@ -129,5 +129,53 @@ func TestBackoff(t *testing.T) {
 		if got := rt.backoff(tt.attempt, tt.retryAfter); got != tt.want {
 			t.Errorf("backoff(%d, %q) = %s, want %s", tt.attempt, tt.retryAfter, got, tt.want)
 		}
+	}
+}
+
+func TestRetryDelay(t *testing.T) {
+	for _, tt := range []struct{ body, want string }{
+		{`{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"37s"}]}}`, "37"},
+		{`{"retryDelay": "1.2s"}`, "2"},
+		{`{"error":{"code":503}}`, ""},
+	} {
+		if got := retryDelay([]byte(tt.body)); got != tt.want {
+			t.Errorf("retryDelay(%s) = %q, want %q", tt.body, got, tt.want)
+		}
+	}
+	rt := &retryTransport{base: 2 * time.Second, max: 30 * time.Second, maxHint: 60 * time.Second}
+	if got := rt.backoff(1, "37"); got != 37*time.Second {
+		t.Errorf("backoff with a 37s hint = %s, want 37s", got)
+	}
+	if got := rt.backoff(1, "120"); got != 60*time.Second {
+		t.Errorf("backoff with a 120s hint = %s, want the 60s cap", got)
+	}
+}
+
+func TestRetryTransportSkipsDailyQuota(t *testing.T) {
+	const quota = `{"error":{"code":429,"details":[{"@type":"type.googleapis.com/google.rpc.RetryInfo","retryDelay":"50170s"}]}}`
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		_, _ = io.WriteString(w, quota)
+	}))
+	defer srv.Close()
+
+	rec, err := trace.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	rt := newRetryTransport(rec, "m", 0)
+	rt.sleep = func(time.Duration) { t.Error("waited for a quota that resets in hours") }
+
+	resp, err := (&http.Client{Transport: rt}).Get(srv.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if calls != 1 || resp.StatusCode != 429 || string(body) != quota {
+		t.Errorf("calls = %d, status = %d, body = %q; want one call and the 429 passed through", calls, resp.StatusCode, body)
 	}
 }

@@ -13,7 +13,7 @@ vet:
 
 check: vet test
 
-# Needs GOOGLE_API_KEY. Asks Gemini to read this repo's go.mod via the read_file tool.
+# Needs a model backend (see .env.example). Asks it to read this repo's go.mod via the read_file tool.
 smoke:
 	go run ./cmd/autodoc smoke
 

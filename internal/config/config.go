@@ -6,39 +6,87 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
+
+	"autodoc/internal/llm"
 )
 
-// Default model chains, first choice first. Each step falls back along its
-// chain when a model is overloaded, rate-limited, timing out or retired.
+// Default model chains per provider, first choice first. Each step falls back
+// along its chain when a model is overloaded, rate-limited, timing out or retired.
 var (
-	defaultAgentModels = []string{"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"}
-	defaultJudgeModels = []string{"gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3.8-flash"}
+	defaultGeminiAgentModels = []string{"gemini-3.8-flash", "gemini-3.7-flash", "gemini-3.5-flash"}
+	defaultGeminiJudgeModels = []string{"gemini-pro-latest", "gemini-3.1-pro-preview", "gemini-3.8-flash"}
+
+	// One model fits a 16 GB GPU at a time, so the local judge is the agents' model.
+	defaultLocalModels = []string{"qwen3:14b"}
+)
+
+const (
+	defaultLocalURL = "http://localhost:11434/v1" // Ollama
+	// Without a key, openai-go would send OPENAI_API_KEY from the environment to the local server.
+	placeholderLocalKey = "local"
+	// A local model may load from disk and then generate on a small GPU for minutes.
+	defaultLocalTimeout = 10 * time.Minute
 )
 
 // Config holds everything the orchestrator needs from the environment.
 type Config struct {
-	APIKey      string   // GOOGLE_API_KEY (AI Studio)
+	Provider    llm.Provider
 	AgentModels []string // AUTODOC_AGENT_MODEL: swagger and docs agents, comma-separated fallback chain
 	JudgeModels []string // AUTODOC_JUDGE_MODEL: grounding judge, comma-separated fallback chain
 	MaxCalls    int      // model calls allowed per agent before it is stopped
 }
 
 // Load reads .env in the working directory, if present, then the environment.
-// It fails only when the API key is missing.
+// AUTODOC_PROVIDER picks the model backend: "local" (default) or "gemini".
+// It fails only when the chosen provider is misconfigured.
 func Load() (Config, error) {
 	if err := LoadDotEnv(".env"); err != nil {
 		return Config{}, fmt.Errorf("load .env: %w", err)
 	}
-	cfg := Config{
-		APIKey:      os.Getenv("GOOGLE_API_KEY"),
-		AgentModels: listOr("AUTODOC_AGENT_MODEL", defaultAgentModels),
-		JudgeModels: listOr("AUTODOC_JUDGE_MODEL", defaultJudgeModels),
-		MaxCalls:    25,
+	cfg := Config{MaxCalls: 25}
+
+	kind := strings.ToLower(strings.TrimSpace(os.Getenv("AUTODOC_PROVIDER")))
+	if kind == "" {
+		kind = llm.ProviderLocal
 	}
-	if cfg.APIKey == "" {
-		return Config{}, errors.New("GOOGLE_API_KEY is not set (see .env.example)")
+	agentDefault, judgeDefault := defaultLocalModels, defaultLocalModels
+	switch kind {
+	case llm.ProviderGemini:
+		cfg.Provider = llm.Provider{Kind: kind, APIKey: os.Getenv("GOOGLE_API_KEY")}
+		agentDefault, judgeDefault = defaultGeminiAgentModels, defaultGeminiJudgeModels
+		if cfg.Provider.APIKey == "" {
+			return Config{}, errors.New("GOOGLE_API_KEY is not set (see .env.example)")
+		}
+	case llm.ProviderLocal:
+		cfg.Provider = llm.Provider{
+			Kind:    kind,
+			APIKey:  strOr("AUTODOC_LOCAL_API_KEY", placeholderLocalKey),
+			BaseURL: strOr("AUTODOC_LOCAL_URL", defaultLocalURL),
+			Timeout: defaultLocalTimeout,
+		}
+	default:
+		return Config{}, fmt.Errorf("AUTODOC_PROVIDER=%q is not supported (use %q or %q)", kind, llm.ProviderLocal, llm.ProviderGemini)
 	}
+
+	if s := strings.TrimSpace(os.Getenv("AUTODOC_HTTP_TIMEOUT")); s != "" {
+		d, err := time.ParseDuration(s)
+		if err != nil || d <= 0 {
+			return Config{}, fmt.Errorf("AUTODOC_HTTP_TIMEOUT=%q is not a positive duration such as 90s or 15m", s)
+		}
+		cfg.Provider.Timeout = d
+	}
+
+	cfg.AgentModels = listOr("AUTODOC_AGENT_MODEL", agentDefault)
+	cfg.JudgeModels = listOr("AUTODOC_JUDGE_MODEL", judgeDefault)
 	return cfg, nil
+}
+
+func strOr(key, fallback string) string {
+	if s := strings.TrimSpace(os.Getenv(key)); s != "" {
+		return s
+	}
+	return fallback
 }
 
 // listOr splits a comma-separated variable, dropping empty entries.

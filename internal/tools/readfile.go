@@ -51,12 +51,7 @@ func ReadFile(absRoot string, args ReadFileArgs) (ReadFileResult, error) {
 	}
 	data, err := os.ReadFile(full)
 	if err != nil {
-		// Report the relative path only; the agent never sees the workdir location.
-		var pe *fs.PathError
-		if errors.As(err, &pe) {
-			err = pe.Err
-		}
-		return ReadFileResult{}, fmt.Errorf("read %s: %w", args.Path, err)
+		return ReadFileResult{}, fmt.Errorf("read %s: %w", args.Path, hidePath(err))
 	}
 	res := ReadFileResult{Path: filepath.ToSlash(args.Path)}
 	if len(data) > maxReadBytes {
@@ -64,6 +59,16 @@ func ReadFile(absRoot string, args ReadFileArgs) (ReadFileResult, error) {
 	}
 	res.Content = string(data)
 	return res, nil
+}
+
+// hidePath drops the absolute path from a file error: the agent sees
+// relative paths only, never the workdir location.
+func hidePath(err error) error {
+	var pe *fs.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }
 
 // resolve joins rel onto absRoot and rejects anything that ends up outside it.

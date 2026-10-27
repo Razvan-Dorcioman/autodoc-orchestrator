@@ -1,11 +1,14 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
+	"regexp"
 	"strconv"
 	"time"
 
@@ -23,18 +26,27 @@ type retryTransport struct {
 	timeout  time.Duration // per attempt
 	base     time.Duration
 	max      time.Duration
+	maxHint  time.Duration       // cap on a wait the server asks for; at least max
 	sleep    func(time.Duration) // replaced in tests
 }
 
-func newRetryTransport(rec *trace.Recorder, model string) *retryTransport {
+const defaultTimeout = 90 * time.Second
+
+// newRetryTransport builds the transport; a zero timeout means defaultTimeout.
+func newRetryTransport(rec *trace.Recorder, model string, timeout time.Duration) *retryTransport {
+	if timeout <= 0 {
+		timeout = defaultTimeout
+	}
 	return &retryTransport{
 		next:     http.DefaultTransport,
 		rec:      rec,
 		model:    model,
 		attempts: 3,
-		timeout:  90 * time.Second,
+		timeout:  timeout,
 		base:     2 * time.Second,
 		max:      30 * time.Second,
+		// The free tier's per-minute quota answers 429 with "retry in ~40s".
+		maxHint: 60 * time.Second,
 	}
 }
 
@@ -80,8 +92,17 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			return resp, nil
 		default:
 			retryAfter = resp.Header.Get("Retry-After")
-			_, _ = io.Copy(io.Discard, resp.Body)
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
 			resp.Body.Close()
+			if retryAfter == "" {
+				retryAfter = retryDelay(body)
+			}
+			if t.hintTooLong(retryAfter) {
+				// A quota that resets in hours, not seconds: hand the error back
+				// now so the next model in the chain takes over.
+				resp.Body = &cancelOnClose{ReadCloser: io.NopCloser(bytes.NewReader(body)), cancel: cancel}
+				return resp, nil
+			}
 			cancel()
 			reason = fmt.Sprintf("model API returned %d", resp.StatusCode)
 		}
@@ -108,13 +129,36 @@ func (c *cancelOnClose) Close() error {
 	return c.ReadCloser.Close()
 }
 
-// backoff doubles from base, capped at max; a Retry-After in seconds wins if it is longer.
+// backoff doubles from base, capped at max; a Retry-After in seconds wins if
+// it is longer, capped at maxHint.
 func (t *retryTransport) backoff(attempt int, retryAfter string) time.Duration {
 	d := min(t.base<<(attempt-1), t.max)
 	if s, err := strconv.Atoi(retryAfter); err == nil && time.Duration(s)*time.Second > d {
-		d = min(time.Duration(s)*time.Second, t.max)
+		d = min(time.Duration(s)*time.Second, max(t.max, t.maxHint))
 	}
 	return d
+}
+
+// hintTooLong reports whether the server asks for a longer wait than maxHint.
+func (t *retryTransport) hintTooLong(retryAfter string) bool {
+	s, err := strconv.Atoi(retryAfter)
+	return err == nil && time.Duration(s)*time.Second > max(t.max, t.maxHint)
+}
+
+var retryDelayRE = regexp.MustCompile(`"retryDelay":\s*"([0-9.]+)s"`)
+
+// retryDelay reads the google.rpc.RetryInfo delay that Gemini puts in a 429
+// body instead of a Retry-After header, as whole seconds rounded up.
+func retryDelay(body []byte) string {
+	m := retryDelayRE.FindSubmatch(body)
+	if m == nil {
+		return ""
+	}
+	f, err := strconv.ParseFloat(string(m[1]), 64)
+	if err != nil {
+		return ""
+	}
+	return strconv.Itoa(int(math.Ceil(f)))
 }
 
 func (t *retryTransport) wait(req *http.Request, d time.Duration) error {

@@ -38,6 +38,42 @@ func TestPrepareClonesLocalRepoOntoBranch(t *testing.T) {
 	}
 }
 
+func TestShowAndRestore(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init", "--quiet", "-b", "main")
+	mustGit(t, dir, "config", "core.autocrlf", "false") // as Prepare's clone has it
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "init")
+
+	if err := os.WriteFile(filepath.Join(dir, "a.go"), []byte("package a\n\n// @title X\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gen := filepath.Join(dir, "internal", "apispec", "swagger.json")
+	if err := os.MkdirAll(filepath.Dir(gen), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(gen, []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if got, err := Show(ctx, dir, "HEAD", "a.go"); err != nil || string(got) != "package a\n" {
+		t.Errorf("Show = %q, %v; want the committed bytes", got, err)
+	}
+	if err := Restore(ctx, dir); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := os.ReadFile(filepath.Join(dir, "a.go")); string(got) != "package a\n" {
+		t.Errorf("after Restore a.go = %q", got)
+	}
+	if _, err := os.Stat(gen); !os.IsNotExist(err) {
+		t.Errorf("after Restore the generated file still exists: %v", err)
+	}
+}
+
 func TestPrepareFailsOnMissingRepo(t *testing.T) {
 	_, err := Prepare(context.Background(), filepath.Join(t.TempDir(), "nope"), filepath.Join(t.TempDir(), "work"))
 	if err == nil || !strings.Contains(err.Error(), "git clone") {

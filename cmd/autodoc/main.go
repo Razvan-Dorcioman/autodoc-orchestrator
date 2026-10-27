@@ -19,7 +19,7 @@ import (
 
 const usage = `usage:
   autodoc run   --repo <url|path> [--runs-dir runs]   document a repository
-  autodoc smoke [--dir .] [--runs-dir runs]           check the ADK + Gemini wiring with one tool call
+  autodoc smoke [--dir .] [--runs-dir runs]           check the ADK + model wiring with one tool call
 `
 
 func main() {
@@ -77,12 +77,16 @@ func cmdRun(ctx context.Context, args []string) error {
 	defer rec.Close()
 	fmt.Println("run:", rec.RunID(), "trace:", rec.Dir())
 	res, err := pipeline.Run(ctx, cfg, rec, pipeline.Input{Repo: *repo})
+	t := rec.Totals()
+	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d\n",
+		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens)
 	if err != nil {
 		return err
 	}
 	fmt.Println("working copy:", res.Repo.Dir, "branch:", res.Repo.Branch)
 	fmt.Println("facts:", res.FactsPath)
-	fmt.Println("stopped after index: the remaining steps are not implemented yet")
+	fmt.Println("spec:", res.SpecDir)
+	fmt.Println("stopped after gate A: the remaining steps are not implemented yet")
 	return nil
 }
 

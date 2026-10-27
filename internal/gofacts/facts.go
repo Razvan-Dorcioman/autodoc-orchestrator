@@ -123,6 +123,7 @@ type Field struct {
 	Type      string `json:"type"`
 	JSON      string `json:"json,omitempty"`
 	OmitEmpty bool   `json:"omitempty,omitempty"`
+	Embedded  bool   `json:"embedded,omitempty"`
 	Doc       string `json:"doc,omitempty"`
 }
 
@@ -477,12 +478,13 @@ func (x *extractor) fields(st *ast.StructType) []Field {
 		for _, n := range fl.Names {
 			names = append(names, n.Name)
 		}
-		if len(names) == 0 { // embedded
+		embedded := len(names) == 0
+		if embedded {
 			names = append(names, exprName(fl.Type))
 		}
 		for _, n := range names {
 			out = append(out, Field{
-				Name: n, Type: x.src(fl.Type), JSON: jsonName, OmitEmpty: omit,
+				Name: n, Type: x.src(fl.Type), JSON: jsonName, OmitEmpty: omit, Embedded: embedded,
 				Doc: docText(fl.Doc, fl.Comment),
 			})
 		}

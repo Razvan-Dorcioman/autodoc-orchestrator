@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"sync"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
@@ -96,11 +97,14 @@ func shouldFallback(ctx context.Context, err error) bool {
 	code := 0
 	var apiErr genai.APIError
 	var apiErrPtr *genai.APIError
+	var oaiErr *openai.Error // local OpenAI-compatible servers
 	switch {
 	case errors.As(err, &apiErr):
 		code = apiErr.Code
 	case errors.As(err, &apiErrPtr):
 		code = apiErrPtr.Code
+	case errors.As(err, &oaiErr):
+		code = oaiErr.StatusCode
 	}
 	return code == http.StatusNotFound || retryable(code)
 }

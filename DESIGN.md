@@ -2,12 +2,12 @@
 
 Orchestrator that points at a Go service (`catalog-poc`) and produces (1) project documentation and (2) swaggo annotations + a generated OpenAPI spec, without changing service behaviour.
 
-**Stack:** Go · Google ADK for Go (`google.golang.org/adk/v2`, exact version pinned) · Gemini via AI Studio (`GOOGLE_API_KEY`) · Flash for agents, Pro for the judge · own JSONL trace.
+**Stack:** Go · Google ADK for Go (`google.golang.org/adk/v2`, exact version pinned) · models behind one `llm.Provider`: a local open-weight model over an OpenAI-compatible API (default, Ollama + `qwen3:14b`) or Gemini via AI Studio (`AUTODOC_PROVIDER=gemini`; Flash for agents, Pro for the judge) · own JSONL trace.
 
 **Why ADK, and where it stops.** ADK is used *inside* each LLM step, not for the pipeline. Each agent is an `llmagent` whose tools are typed `functiontool`s (schemas inferred from Go structs), and ADK runs the model ↔ tool loop. A tool error goes back to the model as the function response, so `patch_comment` rejections become in-loop corrections for free. `Before/AfterModelCallback` and `Before/AfterToolCallback` feed the trace: per-call `UsageMetadata` (tokens), tool arguments, results and errors. The pipeline — step order, gates, outer retries with gate feedback, reset — is plain Go, because it must be deterministic and testable. Stop caps (max model calls per agent, token budget) are a `BeforeModelCallback` that counts and returns an error. The plain `genai` SDK would mean hand-writing the function-calling loop, the tool schemas and the hooks; that's about the same amount of code ADK already gives us, minus the tested edge cases.
 
-**Model availability.** Each LLM step has a model chain (agents: `gemini-3.8-flash → 3.7-flash → 3.5-flash`; judge: `gemini-pro-latest → 3.1-pro-preview → 3.8-flash`; overridable via env).
-- **HTTP level:** each request gets a 90 s deadline and up to 3 attempts with exponential backoff on 429, 500, 502, 503, 504 and timeouts, honouring `Retry-After`. Each retry is a `retry` event in the trace.
+**Model availability.** Each LLM step has a model chain, overridable via env (local: `qwen3:14b` for both steps; Gemini agents: `gemini-3.8-flash → 3.7-flash → 3.5-flash`, judge: `gemini-pro-latest → 3.1-pro-preview → 3.8-flash`). Local models run through ADK's `openaimodel` (Chat Completions), so the agents, tools, hooks and fallback are provider-agnostic; the server needs a ≥16k context (Ollama's default truncates prompts silently).
+- **HTTP level:** each request gets a deadline (90 s for Gemini, 10 min locally, `AUTODOC_HTTP_TIMEOUT`) and up to 3 attempts with exponential backoff on 429, 500, 502, 503, 504 and timeouts, honouring `Retry-After` or Gemini's `RetryInfo.retryDelay` up to 60 s; a longer delay (a daily quota) skips straight to the next model. Each retry is a `retry` event in the trace.
 - **Model level:** if a model still fails with overload, rate limit, timeout or 404 (retired), the step switches to the next model in its chain and stays on it for the rest of the run, recording a `fallback` event. Bad requests and auth errors are not retried, since another model would fail the same way.
 - `model_call` events log the model actually used, so the trace shows which outputs came from a fallback model.
 
@@ -30,8 +30,8 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 |---|---|---|---|
 | fetch | det | Clone the URL or local path (a local path is cloned too, so the original is never touched) into `runs/<id>/work`, branch `autodoc/<base-sha>`, baseline `go build/vet/test` (must be green, or the run stops), snapshot every file: SHA-256 + for `.go` files a code hash of the token stream without comments → `baseline.json` | git, go |
 | index | det | `go/ast` extraction → `facts.json` (see below) | — |
-| strip | det | Remove every `// @…` swag line from `.go` files and the generated outputs → idempotent re-runs | — |
-| Swagger agent | LLM | swaggo `// @` annotations on the 3 handlers + general API info on `main` | `read_file`, `list_symbols`, `get_facts`, `patch_comment` |
+| strip | det | Remove every `// @…` / `//@…` line comment on its own line (tokenized, so strings are safe) from `.go` files, plus `swagger.json`/`.yaml` and a swag-generated `docs.go` in `internal/apispec/` → idempotent re-runs | — |
+| Swagger agent | LLM | swaggo `// @` annotations on the 3 handlers + general API info on `main` | `read_file`, `get_facts`, `patch_comment` |
 | Gate A | det | See *Verification*; structured errors fed back to the agent | go, swag |
 | add route | det | Template-insert `GET /openapi.json` (see below) + a test for it | — |
 | Docs agent | LLM | `docs/*.md`: overview, structure, request flow, business rules, error model, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (scoped to `docs/`) |
@@ -52,7 +52,7 @@ CLI: `autodoc run --repo <url|path>` → working copy in a temp dir, output in `
 
 ## Context strategy
 
-- **Swagger agent:** one handler at a time + its request/response types + its `facts.json` entries + a short swaggo cheat sheet. Never sees docs. Small context → fewer hallucinated params.
+- **Swagger agent:** one ADK session, one turn per handler: the message carries its route facts, the types it writes (transitively), the constants it uses with their enum siblings and the handler source; the instruction holds the rules and a short swaggo cheat sheet. Then one turn for the general info on `main`; failed gate reports come back as further turns. Never sees docs. Small context → fewer hallucinated params.
 - **Docs agent:** `facts.json` + the verified spec as primary sources; `read_file` for details (`pricing.go`, `product.go`, `middleware.go`, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
 - **Judge:** one claim + its cited snippet per call. Cheap, focused, and the verdict is attributable to a specific line of code.
 - Deterministic steps pass artifacts (`facts.json`, spec, gate reports) — agents never get raw logs of earlier steps.
@@ -60,11 +60,11 @@ CLI: `autodoc run --repo <url|path>` → working copy in a temp dir, output in `
 ## Verification
 
 Deterministic (all must pass):
-- **Code unchanged — by construction:** `patch_comment` accepts only *inserting* lines that start with `// @` directly above a func declaration; anything else is a tool error the agent sees and corrects (visible in the trace). Consequence: no struct tags, so no `example:` / `enums:` / `required` on response fields — parameter constraints go in `@Param` attributes instead (`Enums(RON,EUR,HUF) default(RON)`, `minimum(1) maximum(10) default(1)`).
-- **Code unchanged — after the fact:** the code hash of every `.go` file equals the baseline. It hashes the Go token stream with comments and layout dropped, so comments and formatting don't count but any change to code, identifiers, literals or struct tags does; the only allowed exceptions are the new `internal/apispec/` package and the exact expected one-line diff in `router.go`. `go.mod` unchanged (no `go.sum` exists and none may appear).
+- **Code unchanged — by construction:** `patch_comment` (file + func name, never a line number) only sets a function's `// @Name…` lines directly above its func line, after any doc comment; its earlier `// @` lines are replaced, so a retry can correct them. Anything else (other lines, test files, a code-hash change) is a tool error the agent sees and corrects (visible in the trace). Consequence: no struct tags, so no `example:` / `enums:` / `required` on response fields — parameter constraints go in `@Param` attributes instead (`Enums(RON,EUR,HUF) default(RON)`, `minimum(1) maximum(10) default(1)`).
+- **Code unchanged — after the fact:** the code hash of every `.go` file equals the baseline. It hashes the Go token stream with comments and layout dropped, so comments and formatting don't count but any change to code, identifiers, literals or struct tags does; the only allowed exceptions are the new `internal/apispec/` package and the exact expected one-line diff in `router.go`. A changed `.go` file must also equal its base-commit version once `// @` lines are stripped from both, so existing comments and layout stay. `go.mod` unchanged (no `go.sum` exists and none may appear).
 - **Build:** `go build ./...`, `go vet ./...`, `go test ./...` pass (`make check` covers only vet + test). `docker build` too, when Docker is available.
-- **Spec generation:** pinned swag v1 → Swagger 2.0: `swag init -g cmd/server/main.go --parseInternal --outputTypes json,yaml -o internal/apispec` (no `docs.go`, so no new dependency). Output must be valid; regenerating is byte-identical.
-- **Spec ↔ code grounding:** paths, methods, path/query params, defaults, enums, min/max, status codes + error codes and response field names in the spec match `facts.json` exactly — nothing invented, nothing missing.
+- **Spec generation:** swag v1.16.6 via `go run` → Swagger 2.0: `swag init -g cmd/server/main.go --parseInternal --outputTypes json,yaml -o internal/apispec` (no `docs.go`, so no new dependency). Valid = Swagger 2.0 with title/version, every `$ref` resolves, YAML says the same as JSON; regenerating into a temp dir is byte-identical.
+- **Spec ↔ code grounding:** the same operations (`basePath` + path, method) and path/query params (path ones required) as `facts.json`, exactly the status codes each handler writes with the facts' body type, every error code named in its status's description, and definition properties = the types' JSON names — nothing invented, nothing missing. Defaults, enums and min/max are required by the instruction but not checked here: facts don't tie a param to its constants.
 - **Docs ↔ code grounding:** every referenced file, symbol, route, env var and Make target exists; every route, error code, query param, response field and business-rule constant in `facts.json` is mentioned.
 - **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the `router.go` line changed.
 
@@ -78,7 +78,7 @@ Model-judged:
   - `currency` is case-insensitive and trimmed; validation order is id → currency → qty → lookup (an invalid qty on a missing id gives 400, not 404);
   - access logs deliberately omit query strings and client IPs (GDPR) — a "safe to change" constraint.
 
-**On failure:** errors are fed back to the producing agent (≤3 attempts for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline, nothing is committed, and the run exits non-zero with the gate report.
+**On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git checkout -- .` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
 **Stop conditions:** all gates green; retry limit reached; token/cost budget exceeded; per-agent tool-call cap reached.
 
@@ -89,7 +89,7 @@ Model-judged:
 
 ## Trace
 
-- `runs/<run-id>/trace.jsonl`: one event per step start/end, tool call (args, result size, error), model call (model, tokens in/out, latency, estimated cost), retry, gate result.
+- `runs/<run-id>/trace.jsonl`: one event per step start/end, agent turn (final reply), tool call (args, result size, error), model call (model, tokens in/out, latency, estimated cost), retry, gate result.
 - `runs/<run-id>/summary.json`: totals per step and per model, retries, final status, approximate cost (price table in code).
 
 ## Known limitations

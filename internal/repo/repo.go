@@ -50,3 +50,25 @@ func Git(ctx context.Context, dir string, args ...string) (string, error) {
 	}
 	return strings.TrimSpace(stdout.String()), nil
 }
+
+// Show returns the content of path (a slash path) at rev, byte for byte.
+func Show(ctx context.Context, dir, rev, path string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", "show", rev+":"+path)
+	cmd.Dir = dir
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout, cmd.Stderr = &stdout, &stderr
+	if err := cmd.Run(); err != nil {
+		return nil, fmt.Errorf("git show %s:%s: %w: %s", rev, path, err, strings.TrimSpace(stderr.String()))
+	}
+	return stdout.Bytes(), nil
+}
+
+// Restore puts the working copy back to its last commit: tracked files are
+// checked out again and untracked files (not ignored ones) are removed.
+func Restore(ctx context.Context, dir string) error {
+	if _, err := Git(ctx, dir, "checkout", "--quiet", "--", "."); err != nil {
+		return err
+	}
+	_, err := Git(ctx, dir, "clean", "-fdq")
+	return err
+}

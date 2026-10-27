@@ -6,6 +6,7 @@ import (
 	"iter"
 	"testing"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
@@ -92,6 +93,15 @@ func TestFallbackOnRetiredModel(t *testing.T) {
 	fb, _ := newTestFallback(t, a, b)
 	if got, err := generate(t, fb); err != nil || got != "b" {
 		t.Errorf("generate = %q, %v; want b", got, err)
+	}
+}
+
+func TestShouldFallbackOnOpenAIStyleErrors(t *testing.T) {
+	for code, want := range map[int]bool{404: true, 429: true, 503: true, 400: false, 401: false} {
+		err := fmt.Errorf("wrapped: %w", &openai.Error{StatusCode: code})
+		if got := shouldFallback(context.Background(), err); got != want {
+			t.Errorf("shouldFallback(%d) = %v, want %v", code, got, want)
+		}
 	}
 }
 

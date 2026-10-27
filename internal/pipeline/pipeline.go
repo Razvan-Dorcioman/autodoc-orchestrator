@@ -9,14 +9,21 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
+	"autodoc/internal/agents/swagger"
 	"autodoc/internal/config"
 	"autodoc/internal/gofacts"
 	"autodoc/internal/guard"
 	"autodoc/internal/repo"
+	"autodoc/internal/strip"
 	"autodoc/internal/trace"
 	"autodoc/internal/verify"
 )
+
+// swaggerAttempts is how many times gate A may run before the run gives up:
+// the first attempt plus two retries with the gate report fed back.
+const swaggerAttempts = 3
 
 // Input is what a run is pointed at.
 type Input struct {
@@ -27,6 +34,7 @@ type Input struct {
 type Result struct {
 	Repo      *repo.Repo
 	FactsPath string
+	SpecDir   string // the generated swagger.json and swagger.yaml, once gate A is green
 }
 
 // Baseline is the state of the working copy before any change: written to
@@ -42,6 +50,8 @@ type Baseline struct {
 func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) (*Result, error) {
 	res := &Result{}
 	workDir := filepath.Join(rec.Dir(), "work")
+	var snap guard.Snapshot
+	var facts *gofacts.Facts
 
 	err := step(rec, "fetch", func() (string, error) {
 		r, err := repo.Prepare(ctx, in.Repo, workDir)
@@ -56,7 +66,8 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	}
 
 	err = step(rec, "baseline", func() (string, error) {
-		snap, err := guard.Take(workDir)
+		var err error
+		snap, err = guard.Take(workDir)
 		if err != nil {
 			return "", fmt.Errorf("snapshot: %w", err)
 		}
@@ -82,7 +93,8 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	}
 
 	err = step(rec, "index", func() (string, error) {
-		facts, err := gofacts.Extract(ctx, workDir)
+		var err error
+		facts, err = gofacts.Extract(ctx, workDir)
 		if err != nil {
 			return "", err
 		}
@@ -93,7 +105,77 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		return fmt.Sprintf("%d routes, %d response sites, %d constants, %d types, %d env vars, %d tests",
 			len(facts.Routes), len(facts.Responses), len(facts.Constants), len(facts.Types), len(facts.Env), len(facts.Tests)), nil
 	})
-	return res, err
+	if err != nil {
+		return res, err
+	}
+
+	// From here on the working copy changes; on failure it goes back to the baseline.
+	err = step(rec, "strip", func() (string, error) {
+		r, err := strip.Run(workDir)
+		if err != nil {
+			return "", err
+		}
+		return fmt.Sprintf("removed %d annotation lines from %d files; deleted %d generated spec files", r.Lines, r.Files, len(r.Deleted)), nil
+	})
+	if err == nil {
+		err = step(rec, swagger.Step, func() (string, error) {
+			return annotate(ctx, cfg, rec, workDir, snap, facts)
+		})
+	}
+	if err != nil {
+		if rErr := repo.Restore(ctx, workDir); rErr != nil {
+			return res, fmt.Errorf("%w; restoring the working copy also failed: %v", err, rErr)
+		}
+		return res, fmt.Errorf("%w; the working copy was restored to the baseline", err)
+	}
+	res.SpecDir = filepath.Join(workDir, filepath.FromSlash(strip.SpecDir))
+	return res, nil
+}
+
+// annotate runs the swagger agent and gate A, feeding each failed gate
+// report back to the agent in the same session, at most swaggerAttempts times.
+func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, workDir string, snap guard.Snapshot, facts *gofacts.Facts) (string, error) {
+	a, err := swagger.New(ctx, cfg, rec, workDir, facts)
+	if err != nil {
+		return "", err
+	}
+	if err := a.Annotate(ctx); err != nil {
+		return "", err
+	}
+	in := verify.GateAInput{
+		Dir:      workDir,
+		Baseline: snap,
+		Original: func(rel string) ([]byte, error) { return repo.Show(ctx, workDir, "HEAD", rel) },
+		Facts:    facts,
+	}
+	for attempt := 1; ; attempt++ {
+		start := time.Now()
+		rep := verify.GateA(ctx, in)
+		if err := writeJSON(filepath.Join(rec.Dir(), "gate_a.json"), rep); err != nil {
+			return "", err
+		}
+		e := trace.Event{
+			Type: trace.Gate, Step: "gate_a", LatencyMS: time.Since(start).Milliseconds(),
+			Detail: fmt.Sprintf("attempt %d of %d: %d issue(s)", attempt, swaggerAttempts, len(rep.Issues)),
+		}
+		if !rep.OK() {
+			e.Error = rep.String()
+		}
+		rec.Emit(e)
+		if rep.OK() {
+			return fmt.Sprintf("gate A green on attempt %d of %d", attempt, swaggerAttempts), nil
+		}
+		if attempt == swaggerAttempts {
+			return "", fmt.Errorf("gate A still fails after %d attempts (report in gate_a.json):\n%s", attempt, rep)
+		}
+		rec.Emit(trace.Event{
+			Type: trace.Retry, Step: swagger.Step,
+			Detail: fmt.Sprintf("attempt %d of %d: %d gate A issue(s) sent back to the agent", attempt+1, swaggerAttempts, len(rep.Issues)),
+		})
+		if err := a.Fix(ctx, rep.String()); err != nil {
+			return "", err
+		}
+	}
 }
 
 // step wraps fn in step_start / step_end trace events.

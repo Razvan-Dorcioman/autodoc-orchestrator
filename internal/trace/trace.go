@@ -22,6 +22,7 @@ const (
 	StepEnd   = "step_end"
 	ModelCall = "model_call"
 	ToolCall  = "tool_call"
+	Turn      = "agent_turn" // one user message to an agent and its final reply
 	Retry     = "retry"
 	Fallback  = "fallback"
 	Gate      = "gate"
