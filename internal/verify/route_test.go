@@ -82,3 +82,50 @@ func TestRoute(t *testing.T) {
 		t.Errorf("after editing the route line: issues = %q\n%s", got, rep)
 	}
 }
+
+// TestGateAWithoutSpec is a re-run where swag fails: the apispec.go of an
+// earlier run embeds the swagger.json strip deleted, so gate A reports swag
+// and leaves the build, which could only fail for that reason, unchecked.
+func TestGateAWithoutSpec(t *testing.T) {
+	if testing.Short() {
+		t.Skip("runs swag")
+	}
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("../gofacts/testdata/svc")); err != nil {
+		t.Fatal(err)
+	}
+	facts, err := gofacts.Extract(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan, err := specroute.PlanFor(dir, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := specroute.Apply(dir, plan); err != nil {
+		t.Fatal(err)
+	}
+	base, err := guard.Take(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rep := GateA(ctx, GateAInput{
+		Dir:        dir,
+		Main:       "cmd/server/missing.go", // swag fails
+		Baseline:   base,
+		BaseChecks: []CheckResult{{Name: "build", OK: true}, {Name: "vet", OK: true}},
+		Original:   func(rel string) ([]byte, error) { return os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))) },
+		Facts:      facts,
+	})
+	var checks, issues []string
+	for _, c := range rep.Checks {
+		checks = append(checks, c.Name)
+	}
+	for _, is := range rep.Issues {
+		issues = append(issues, is.Check)
+	}
+	if strings.Join(checks, " ") != "swag" || strings.Join(issues, " ") != "swag" {
+		t.Errorf("checks %q, issues %q; want only swag:\n%s", checks, issues, rep)
+	}
+}

@@ -100,6 +100,13 @@ func GateA(ctx context.Context, in GateAInput) Report {
 		add(checkScope(in.Baseline, cur, in.Dir, in.Original)...)
 	}
 
+	// Without a spec, a build fails only because the apispec.go an earlier
+	// run added embeds the missing swagger.json: on a re-run, strip deletes
+	// it and swag writes it again. Only comments changed, so the build is
+	// checked once swag succeeds.
+	if _, err := os.Stat(filepath.Join(in.Dir, filepath.FromSlash(strip.SpecDir), "swagger.json")); !gen.OK && err != nil {
+		return rep
+	}
 	checks := Checks(ctx, in.Dir, in.RunTests)
 	rep.Checks = append(rep.Checks, checks...)
 	for _, c := range Regressions(in.BaseChecks, checks) {
