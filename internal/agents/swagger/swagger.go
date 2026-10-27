@@ -273,32 +273,11 @@ func shortName(handler string) string {
 // relatedTypes returns the response body types of r and, transitively, the
 // module types their fields use.
 func relatedTypes(f *gofacts.Facts, r gofacts.Route) []gofacts.Type {
-	byName := map[string]gofacts.Type{}
-	for _, t := range f.Types {
-		byName[t.Package+"."+t.Name] = t
-	}
-	var out []gofacts.Type
-	seen := map[string]bool{}
-	var visit func(name string)
-	visit = func(name string) {
-		t, ok := byName[name]
-		if !ok || seen[name] {
-			return
-		}
-		seen[name] = true
-		out = append(out, t)
-		for _, fl := range t.Fields {
-			ft := strings.TrimLeft(fl.Type, "*[]")
-			if !strings.Contains(ft, ".") {
-				ft = t.Package + "." + ft
-			}
-			visit(ft)
-		}
-	}
+	var bodies []string
 	for _, s := range r.Responses {
-		visit(s.Body)
+		bodies = append(bodies, s.Body)
 	}
-	return out
+	return f.Reachable(bodies...)
 }
 
 // relatedConstants returns the constants r uses and every constant sharing

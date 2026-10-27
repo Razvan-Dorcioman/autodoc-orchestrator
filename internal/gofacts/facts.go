@@ -248,6 +248,37 @@ func (f *Facts) Entrypoint() (string, error) {
 	return "", fmt.Errorf("several main packages serve the routes (%s); name the one to document with --main", strings.Join(files, ", "))
 }
 
+// Reachable returns the module types named in names ("pkg.Type") and,
+// transitively, the module types their fields use, each once, in visit order.
+func (f *Facts) Reachable(names ...string) []Type {
+	byName := map[string]Type{}
+	for _, t := range f.Types {
+		byName[t.Package+"."+t.Name] = t
+	}
+	var out []Type
+	seen := map[string]bool{}
+	var visit func(name string)
+	visit = func(name string) {
+		t, ok := byName[name]
+		if !ok || seen[name] {
+			return
+		}
+		seen[name] = true
+		out = append(out, t)
+		for _, fl := range t.Fields {
+			ft := strings.TrimLeft(fl.Type, "*[]")
+			if !strings.Contains(ft, ".") {
+				ft = t.Package + "." + ft
+			}
+			visit(ft)
+		}
+	}
+	for _, name := range names {
+		visit(name)
+	}
+	return out
+}
+
 // mains lists the main packages and whether each serves the routes.
 func (x *extractor) mains(routes []Route) []Main {
 	byPath := map[string]*packages.Package{}

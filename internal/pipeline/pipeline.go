@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"autodoc/internal/agents/docs"
 	"autodoc/internal/agents/swagger"
 	"autodoc/internal/config"
 	"autodoc/internal/gofacts"
@@ -28,6 +29,10 @@ import (
 // the first attempt plus two retries with the gate report fed back.
 const swaggerAttempts = 3
 
+// docsAttempts is how many times gate B may run: the first attempt plus one
+// retry with each page's issues fed back to the session that wrote it.
+const docsAttempts = 2
+
 // Input is what a run is pointed at.
 type Input struct {
 	Repo     string // git URL or local path
@@ -42,6 +47,7 @@ type Result struct {
 	Main      string          // file that holds the general API info
 	Route     *specroute.Plan // where GET /openapi.json is registered
 	SpecDir   string          // the generated swagger.json and swagger.yaml, once gate A is green
+	Docs      []string        // the documentation pages, once gate B is green
 }
 
 // Baseline is the state of the working copy before any change: written to
@@ -169,6 +175,11 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 			})
 		})
 	}
+	if err == nil {
+		err = step(rec, docs.Step, func() (string, error) {
+			return document(ctx, cfg, rec, workDir, facts)
+		})
+	}
 	if err != nil {
 		if rErr := repo.Restore(ctx, workDir); rErr != nil {
 			return res, fmt.Errorf("%w; restoring the working copy also failed: %v", err, rErr)
@@ -176,6 +187,9 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		return res, fmt.Errorf("%w; the working copy was restored to the baseline", err)
 	}
 	res.SpecDir = filepath.Join(workDir, filepath.FromSlash(strip.SpecDir))
+	for _, p := range verify.DocPages {
+		res.Docs = append(res.Docs, filepath.Join(workDir, filepath.FromSlash(p)))
+	}
 	return res, nil
 }
 
@@ -243,6 +257,68 @@ func addRoute(ctx context.Context, rec *trace.Recorder, in verify.RouteInput) (s
 		return "", fmt.Errorf("the spec route check failed (report in route.json):\n%s", rep)
 	}
 	return fmt.Sprintf("%s; served from %s", in.Plan, specroute.File), nil
+}
+
+// document runs the docs agent and gate B, sending each page's issues back
+// to the session that wrote it, at most docsAttempts times.
+func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir string, facts *gofacts.Facts) (string, error) {
+	before, err := guard.Take(dir)
+	if err != nil {
+		return "", fmt.Errorf("snapshot: %w", err)
+	}
+	// A page left by an earlier run would pass for one written now.
+	for _, p := range verify.DocPages {
+		if err := os.Remove(filepath.Join(dir, filepath.FromSlash(p))); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+	}
+	a, err := docs.New(ctx, cfg, rec, dir, facts)
+	if err != nil {
+		return "", err
+	}
+	if err := a.Write(ctx); err != nil {
+		return "", err
+	}
+	for attempt := 1; ; attempt++ {
+		start := time.Now()
+		rep := verify.GateB(verify.GateBInput{Dir: dir, Facts: facts, Before: before})
+		if err := writeJSON(filepath.Join(rec.Dir(), "gate_b.json"), rep); err != nil {
+			return "", err
+		}
+		e := trace.Event{
+			Type: trace.Gate, Step: "gate_b", LatencyMS: time.Since(start).Milliseconds(),
+			Detail: fmt.Sprintf("attempt %d of %d: %d issue(s)", attempt, docsAttempts, len(rep.Issues)),
+		}
+		if !rep.OK() {
+			e.Error = rep.String()
+		}
+		rec.Emit(e)
+		if rep.OK() {
+			return fmt.Sprintf("%d pages; gate B green on attempt %d of %d", len(verify.DocPages), attempt, docsAttempts), nil
+		}
+		if attempt == docsAttempts {
+			return "", fmt.Errorf("gate B still fails after %d attempts (report in gate_b.json):\n%s", attempt, rep)
+		}
+		byPage := map[string][]verify.Issue{}
+		for _, is := range rep.Issues {
+			page, _, _ := strings.Cut(is.Where, ":")
+			if !slices.Contains(verify.DocPages, page) {
+				return "", fmt.Errorf("gate B found an issue outside the pages, which the docs agent cannot fix (report in gate_b.json):\n%s", rep)
+			}
+			byPage[page] = append(byPage[page], is)
+		}
+		rec.Emit(trace.Event{
+			Type: trace.Retry, Step: docs.Step,
+			Detail: fmt.Sprintf("attempt %d of %d: %d gate B issue(s) on %d page(s) sent back to the agent", attempt+1, docsAttempts, len(rep.Issues), len(byPage)),
+		})
+		for _, p := range verify.DocPages {
+			if is := byPage[p]; len(is) > 0 {
+				if err := a.Fix(ctx, p, is); err != nil {
+					return "", err
+				}
+			}
+		}
+	}
 }
 
 // entrypoint is the file with the func main that gets the general API info:

@@ -34,7 +34,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | Swagger agent | LLM | swaggo `// @` annotations on every route handler + general API info on that command's `main` | `read_file`, `get_facts`, `patch_comment` |
 | Gate A | det | See *Verification*; structured errors fed back to the agent | go, swag |
 | add route | det | Template-insert `GET /openapi.json` (see below); checked by the orchestrator (`route.json`), no test added to the repo | — |
-| Docs agent | LLM | `docs/*.md`: overview, structure, request flow, business rules, error model, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (scoped to `docs/`) |
+| Docs agent | LLM | Eight `docs/` pages: overview, structure, request flow, API, business rules, errors, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (one page per turn) |
 | Gate B | det | See *Verification* | — |
 | Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | `read_file` |
 | commit | det | One separate commit on the branch; push / open MR only if a token is set; write run summary | git |
@@ -53,7 +53,7 @@ CLI: `autodoc run --repo <url|path> [--main <file>] [--run-tests]` → working c
 ## Context strategy
 
 - **Swagger agent:** one ADK session, one turn per handler: the message carries its route facts, the types it writes (transitively), the constants it uses with their enum siblings and the handler source; the instruction holds the rules and a short swaggo cheat sheet. Then one turn for the general info on `main`; failed gate reports come back as further turns. Never sees docs. Small context → fewer hallucinated params.
-- **Docs agent:** `facts.json` + the verified spec as primary sources; `read_file` for details (the functions handlers call, middleware, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
+- **Docs agent:** one session per page, so a prompt fits a 16k local context and gate B's issues for a page go back to the session that wrote it. The message carries the page's brief, the facts gate B requires it to mention, and the slice of `facts.json` it is written from (the verified spec for the API page); `read_file` for details (the functions handlers call, middleware, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
 - **Judge:** one claim + its cited snippet per call. Cheap, focused, and the verdict is attributable to a specific line of code.
 - Deterministic steps pass artifacts (`facts.json`, spec, gate reports) — agents never get raw logs of earlier steps.
 
@@ -65,8 +65,8 @@ Deterministic (all must pass):
 - **Build:** the orchestrator's own checks, never the repo's scripts: `go build ./...` and `go vet ./...` (which compiles the tests without running them). A check green at the baseline must stay green; one already red (say, an existing vet finding) doesn't block. The repo's own tests run only with `--run-tests` and are reported, never blocking: they may need a database, network or secrets, and the code guard already proves no code changed.
 - **Spec generation:** swag v1.16.6 via `go run` → Swagger 2.0: `swag init -g <main file> --parseInternal --outputTypes json,yaml -o internal/apispec` (no `docs.go`, so no new dependency). Valid = Swagger 2.0 with title/version, every `$ref` resolves, YAML says the same as JSON; regenerating into a temp dir is byte-identical.
 - **Spec ↔ code grounding:** the same operations (`basePath` + path, method) and path/query params (path ones required) as `facts.json`, exactly the status codes each handler writes with the facts' body type, every error code named in its status's description, and definition properties = the types' JSON names — nothing invented, nothing missing. Defaults, enums and min/max are required by the instruction but not checked here: facts don't tie a param to its constants.
-- **Docs ↔ code grounding:** every referenced file, symbol, route, env var and Make target exists; every route, error code, query param, response field and business-rule constant in `facts.json` is mentioned.
-- **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the one route line changed.
+- **Docs ↔ code grounding:** every reference resolves: `file:symbol` (or `file:line`) to a file and a declaration in it, `pkg.Symbol` to a module package, `METHOD /path` to a route, `make x` and `Makefile:x` to a target, an env var in code to one the code reads or the Makefile/Dockerfile names, a relative link to a file. Each fact has one page that must name it: routes, params and success-body fields on the API page; error codes, error-body fields and the mux's 4xx on errors; constants on business rules; env vars and server settings on configuration; Make targets on test & ship; package dirs on structure.
+- **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the one route line changed; the docs step changes only its pages.
 
 Model-judged:
 - **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged.
@@ -77,7 +77,7 @@ Model-judged:
 
 ## Re-runnability
 
-- Idempotent regeneration: all `// @` lines are stripped and rewritten each run; `docs/` and `internal/apispec/` are regenerated in full; the route template is a no-op if the line is already present.
+- Idempotent regeneration: all `// @` lines are stripped and rewritten each run; the docs pages are deleted and rewritten and `internal/apispec/` is regenerated in full; the route template is a no-op if the line is already present.
 - On an unchanged service, a second run should produce a near-empty diff. After a code change (e.g. a new `query.Get("…")` or a new response field), `facts.json` changes, so gate A fails until the annotation exists and gate B fails until the docs mention it.
 
 ## Trace

@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 
 	"autodoc/internal/config"
 	"autodoc/internal/pipeline"
@@ -91,7 +92,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	fmt.Println("general API info:", res.Main)
 	fmt.Println("spec:", res.SpecDir)
 	fmt.Println("spec route:", res.Route)
-	fmt.Println("stopped after adding the spec route: the docs agent, gate B, judge and commit are not implemented yet")
+	fmt.Println("docs:", filepath.Dir(res.Docs[0]))
+	fmt.Println("stopped after gate B: the judge and commit are not implemented yet")
 	return nil
 }
 
