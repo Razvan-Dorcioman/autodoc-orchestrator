@@ -59,6 +59,9 @@ func NewModel(ctx context.Context, name string, p Provider, rec *trace.Recorder)
 			HTTPClient: client,
 			API:        openaimodel.APIChatCompletions,
 		})
+		if err == nil {
+			m = emptyOutputModel{m}
+		}
 	default:
 		return nil, fmt.Errorf("unknown model provider %q", p.Kind)
 	}
@@ -115,7 +118,12 @@ func (h *Hooks) onModelError(ctx agent.Context, _ *model.LLMRequest, err error) 
 	h.mu.Lock()
 	latency := time.Since(h.start).Milliseconds()
 	h.mu.Unlock()
-	h.Rec.Emit(trace.Event{Type: trace.ModelCall, Step: h.Step, Agent: ctx.AgentName(), Model: h.Model.Name(), LatencyMS: latency, Error: err.Error()})
+	e := trace.Event{Type: trace.ModelCall, Step: h.Step, Agent: ctx.AgentName(), Model: h.Model.Name(), LatencyMS: latency, Error: err.Error()}
+	var empty *EmptyOutputError
+	if errors.As(err, &empty) {
+		e.FinishReason = empty.FinishReason
+	}
+	h.Rec.Emit(e)
 	return nil, nil
 }
 

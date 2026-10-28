@@ -16,9 +16,12 @@ import (
 )
 
 // fakeOllama answers /v1/chat/completions like an OpenAI-compatible local
-// server: 404 for models in missing, a one-word completion for the rest.
+// server: 404 for models in missing, a reasoning-only reply with no answer for
+// the next empty[model] requests (every request if negative), and a one-word
+// completion otherwise.
 type fakeOllama struct {
 	missing map[string]bool
+	empty   map[string]int
 
 	mu    sync.Mutex
 	paths []string
@@ -38,9 +41,19 @@ func (f *fakeOllama) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	f.paths = append(f.paths, r.URL.Path)
 	f.auths = append(f.auths, r.Header.Get("Authorization"))
 	f.asked = append(f.asked, name)
+	empty := f.empty[name] != 0
+	if f.empty[name] > 0 {
+		f.empty[name]--
+	}
 	f.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
+	if empty {
+		fmt.Fprintf(w, `{"id":"c1","object":"chat.completion","created":1,"model":%q,
+			"choices":[{"index":0,"message":{"role":"assistant","content":"","reasoning":"hmm, let me think"},"finish_reason":"length"}],
+			"usage":{"prompt_tokens":3,"completion_tokens":9,"total_tokens":12}}`, name)
+		return
+	}
 	if f.missing[name] {
 		w.WriteHeader(http.StatusNotFound)
 		fmt.Fprintf(w, `{"error":{"message":"model %q not found, try pulling it first","type":"api_error","param":null,"code":null}}`, name)

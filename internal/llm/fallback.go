@@ -16,9 +16,9 @@ import (
 )
 
 // Fallback is a model.LLM over a chain of models. When the active model fails
-// with an availability error (after the HTTP retries), it switches to the next
-// model in the chain and stays there for the rest of the run. Every switch is
-// recorded in the trace.
+// with an availability error or keeps replying empty (after the HTTP
+// retries), it switches to the next model in the chain and stays there for the
+// rest of the run. Every switch is recorded in the trace.
 type Fallback struct {
 	models []model.LLM
 	rec    *trace.Recorder
@@ -85,13 +85,13 @@ func (f *Fallback) GenerateContent(ctx context.Context, req *model.LLMRequest, s
 }
 
 // shouldFallback reports whether another model could succeed where this one
-// failed: overload, rate limits, timeouts and retired models. Bad requests and
-// auth errors would fail the same way on any model.
+// failed: overload, rate limits, timeouts, retired models and empty replies.
+// Bad requests and auth errors would fail the same way on any model.
 func shouldFallback(ctx context.Context, err error) bool {
 	if ctx.Err() != nil {
 		return false // the run itself was cancelled
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if errors.Is(err, context.DeadlineExceeded) || isEmptyOutput(err) {
 		return true
 	}
 	code := 0

@@ -16,7 +16,8 @@ import (
 )
 
 // retryTransport retries model API requests that failed with a transient
-// status (rate limit, overload) and records every retry in the trace. It does
+// status (rate limit, overload) or came back empty (see emptyCompletion), and
+// records every retry in the trace. It does
 // this at the HTTP layer so a retry stays inside one ADK model call.
 type retryTransport struct {
 	next     http.RoundTripper
@@ -31,6 +32,9 @@ type retryTransport struct {
 }
 
 const defaultTimeout = 90 * time.Second
+
+// testSleep, when set, replaces the backoff wait in transports built by NewModel.
+var testSleep func(time.Duration)
 
 // newRetryTransport builds the transport; a zero timeout means defaultTimeout.
 func newRetryTransport(rec *trace.Recorder, model string, timeout time.Duration) *retryTransport {
@@ -47,6 +51,7 @@ func newRetryTransport(rec *trace.Recorder, model string, timeout time.Duration)
 		max:      30 * time.Second,
 		// The free tier's per-minute quota answers 429 with "retry in ~40s".
 		maxHint: 60 * time.Second,
+		sleep:   testSleep,
 	}
 }
 
@@ -77,7 +82,7 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		resp, err := t.next.RoundTrip(req.WithContext(attemptCtx))
 		last := attempt == t.attempts
 
-		var reason, retryAfter string
+		var reason, retryAfter, finishReason string
 		switch {
 		case err != nil:
 			cancel()
@@ -87,6 +92,12 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			}
 			reason = fmt.Sprintf("model API did not respond within %s", t.timeout)
 		case !retryable(resp.StatusCode) || last:
+			if fr, chars, empty := emptyCompletion(req, resp); empty && !last {
+				cancel()
+				finishReason = fr
+				reason = "model returned no text or tool call (" + describeEmpty(fr, chars) + ")"
+				break
+			}
 			// The deadline must outlive this call: the caller still reads the body.
 			resp.Body = &cancelOnClose{ReadCloser: resp.Body, cancel: cancel}
 			return resp, nil
@@ -109,9 +120,10 @@ func (t *retryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 		wait := t.backoff(attempt, retryAfter)
 		t.rec.Emit(trace.Event{
-			Type:   trace.Retry,
-			Model:  t.model,
-			Detail: fmt.Sprintf("%s; attempt %d of %d, retrying in %s", reason, attempt, t.attempts, wait),
+			Type:         trace.Retry,
+			Model:        t.model,
+			FinishReason: finishReason,
+			Detail:       fmt.Sprintf("%s; attempt %d of %d, retrying in %s", reason, attempt, t.attempts, wait),
 		})
 		if err := t.wait(req, wait); err != nil {
 			return nil, err
