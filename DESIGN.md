@@ -29,7 +29,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | Step | Kind | Responsibility | Tools |
 |---|---|---|---|
 | fetch | det | Clone the URL or local path (a local path is cloned too, so the original is never touched) into `runs/<id>/work`, branch `autodoc/<base-sha>`, baseline `go build` (must be green, or the run stops) and `go vet`, snapshot every file: SHA-256 + for `.go` files a code hash of the token stream without comments → `baseline.json` | git, go |
-| index | det | `go/ast` extraction → `facts.json` (see below); picks the command for the general API info: the one `main` package that registers a route or imports a package that does (`--main` overrides); plans the extra route, so a service the template can't handle fails before any LLM call | — |
+| index | det | `go/ast` extraction → `facts.json` (see below); picks the command for the general API info: the one `main` package that registers a route or imports a package that does (`--main` overrides); fails if the repo has a spec of its own outside `internal/apispec/` (a Swagger/OpenAPI document by its top-level key, a swag `docs.go`, a `github.com/swaggo/` import such as http-swagger; `vendor`/`testdata` skipped), which would go stale next to the generated one; plans the extra route, so a service the template can't handle fails before any LLM call | — |
 | strip | det | Remove every `// @…` / `//@…` line comment on its own line (tokenized, so strings are safe) from `.go` files, plus `swagger.json`/`.yaml` and a swag-generated `docs.go` in `internal/apispec/` → idempotent re-runs | — |
 | Swagger agent | LLM | swaggo `// @` annotations on every route handler + general API info on that command's `main` | `read_file`, `get_facts`, `patch_comment` |
 | Gate A | det | See *Verification*; structured errors fed back to the agent | go, swag |
@@ -97,6 +97,7 @@ Model-judged:
 - Business-rule coverage is checked against constants and a checklist, not semantics.
 - Re-runs regenerate rather than update; docs wording may churn between runs even when the code didn't change.
 - `swag` is fetched with `go run` at a pinned version → needs network access on the first run.
+- A repo with its own spec (spec-first, or swag output elsewhere) is rejected, not merged with or migrated.
 - Single repo, single language (Go), no incremental mode.
 
 ## With one more week

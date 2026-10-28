@@ -184,8 +184,11 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		if res.Main, err = entrypoint(facts, in.Main); err != nil {
 			return "", err
 		}
-		// Planned now so that a service the route template cannot handle
-		// fails before the agents run.
+		// Checked and planned now so that a service with a spec of its own,
+		// or one the route template cannot handle, fails before the agents run.
+		if err := specroute.CheckExisting(workDir); err != nil {
+			return "", err
+		}
 		plan, err := specroute.PlanFor(workDir, facts)
 		if err != nil {
 			return "", fmt.Errorf("spec route: %w", err)
