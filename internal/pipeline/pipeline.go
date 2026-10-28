@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"autodoc/internal/agents/docs"
+	"autodoc/internal/agents/judge"
 	"autodoc/internal/agents/swagger"
 	"autodoc/internal/config"
 	"autodoc/internal/gofacts"
@@ -29,8 +30,9 @@ import (
 // the first attempt plus two retries with the gate report fed back.
 const swaggerAttempts = 3
 
-// docsAttempts is how many times gate B may run: the first attempt plus one
-// retry with each page's issues fed back to the session that wrote it.
+// docsAttempts is how many times gate B and the judge may run: the first
+// attempt plus one retry with each page's issues fed back to the session
+// that wrote it.
 const docsAttempts = 2
 
 // Input is what a run is pointed at.
@@ -47,7 +49,8 @@ type Result struct {
 	Main      string          // file that holds the general API info
 	Route     *specroute.Plan // where GET /openapi.json is registered
 	SpecDir   string          // the generated swagger.json and swagger.yaml, once gate A is green
-	Docs      []string        // the documentation pages, once gate B is green
+	Docs      []string        // the documentation pages, once gate B is green and the judge passed
+	Judge     string          // the judge's report
 }
 
 // Baseline is the state of the working copy before any change: written to
@@ -190,6 +193,7 @@ func Run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	for _, p := range verify.DocPages {
 		res.Docs = append(res.Docs, filepath.Join(workDir, filepath.FromSlash(p)))
 	}
+	res.Judge = filepath.Join(rec.Dir(), "judge.json")
 	return res, nil
 }
 
@@ -259,8 +263,10 @@ func addRoute(ctx context.Context, rec *trace.Recorder, in verify.RouteInput) (s
 	return fmt.Sprintf("%s; served from %s", in.Plan, specroute.File), nil
 }
 
-// document runs the docs agent and gate B, sending each page's issues back
-// to the session that wrote it, at most docsAttempts times.
+// document runs the docs agent, then gate B and the judge as one check:
+// gate B's issues, or once it is green the claims the judge found
+// unsupported, go back to the session that wrote each page, at most
+// docsAttempts times. After a fix gate B runs again before the judge.
 func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir string, facts *gofacts.Facts) (string, error) {
 	before, err := guard.Take(dir)
 	if err != nil {
@@ -279,6 +285,10 @@ func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir s
 	if err := a.Write(ctx); err != nil {
 		return "", err
 	}
+	j, err := judge.New(ctx, cfg, rec)
+	if err != nil {
+		return "", err
+	}
 	for attempt := 1; ; attempt++ {
 		start := time.Now()
 		rep := verify.GateB(verify.GateBInput{Dir: dir, Facts: facts, Before: before})
@@ -293,23 +303,40 @@ func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir s
 			e.Error = rep.String()
 		}
 		rec.Emit(e)
+		check, file := "gate B", "gate_b.json"
 		if rep.OK() {
-			return fmt.Sprintf("%d pages; gate B green on attempt %d of %d", len(verify.DocPages), attempt, docsAttempts), nil
+			jrep, err := j.Check(ctx, dir, facts)
+			if err != nil {
+				return "", err
+			}
+			if err := writeJSON(filepath.Join(rec.Dir(), "judge.json"), jrep); err != nil {
+				return "", err
+			}
+			rep = verify.Report{Gate: "judge", Issues: jrep.Issues()}
+			e := trace.Event{
+				Type: trace.Gate, Step: judge.Step, LatencyMS: jrep.DurationMS,
+				Detail: fmt.Sprintf("attempt %d of %d: %s", attempt, docsAttempts, jrep.Summary()),
+			}
+			if !rep.OK() {
+				e.Error = rep.String()
+			}
+			rec.Emit(e)
+			if rep.OK() {
+				return fmt.Sprintf("%d pages; gate B green and the judge passed on attempt %d of %d: %s",
+					len(verify.DocPages), attempt, docsAttempts, jrep.Summary()), nil
+			}
+			check, file = "the judge", "judge.json"
 		}
 		if attempt == docsAttempts {
-			return "", fmt.Errorf("gate B still fails after %d attempts (report in gate_b.json):\n%s", attempt, rep)
+			return "", fmt.Errorf("%s still fails after %d attempts (report in %s):\n%s", check, attempt, file, rep)
 		}
-		byPage := map[string][]verify.Issue{}
-		for _, is := range rep.Issues {
-			page, _, _ := strings.Cut(is.Where, ":")
-			if !slices.Contains(verify.DocPages, page) {
-				return "", fmt.Errorf("gate B found an issue outside the pages, which the docs agent cannot fix (report in gate_b.json):\n%s", rep)
-			}
-			byPage[page] = append(byPage[page], is)
+		byPage, err := issuesByPage(rep.Issues)
+		if err != nil {
+			return "", fmt.Errorf("%s: %w (report in %s):\n%s", check, err, file, rep)
 		}
 		rec.Emit(trace.Event{
 			Type: trace.Retry, Step: docs.Step,
-			Detail: fmt.Sprintf("attempt %d of %d: %d gate B issue(s) on %d page(s) sent back to the agent", attempt+1, docsAttempts, len(rep.Issues), len(byPage)),
+			Detail: fmt.Sprintf("attempt %d of %d: %d %s issue(s) on %d page(s) sent back to the agent", attempt+1, docsAttempts, len(rep.Issues), check, len(byPage)),
 		})
 		for _, p := range verify.DocPages {
 			if is := byPage[p]; len(is) > 0 {
@@ -319,6 +346,21 @@ func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir s
 			}
 		}
 	}
+}
+
+// issuesByPage groups issues by the page their Where names, so each goes
+// back to the session that wrote the page. An issue elsewhere is one the
+// docs agent cannot fix.
+func issuesByPage(issues []verify.Issue) (map[string][]verify.Issue, error) {
+	byPage := map[string][]verify.Issue{}
+	for _, is := range issues {
+		page, _, _ := strings.Cut(is.Where, ":")
+		if !slices.Contains(verify.DocPages, page) {
+			return nil, fmt.Errorf("an issue at %q is outside the pages, which the docs agent cannot fix", is.Where)
+		}
+		byPage[page] = append(byPage[page], is)
+	}
+	return byPage, nil
 }
 
 // entrypoint is the file with the func main that gets the general API info:

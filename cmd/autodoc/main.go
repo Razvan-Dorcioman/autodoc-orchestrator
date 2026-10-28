@@ -93,7 +93,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	fmt.Println("spec:", res.SpecDir)
 	fmt.Println("spec route:", res.Route)
 	fmt.Println("docs:", filepath.Dir(res.Docs[0]))
-	fmt.Println("stopped after gate B: the judge and commit are not implemented yet")
+	fmt.Println("judge:", res.Judge)
+	fmt.Println("stopped after the judge: the commit step is not implemented yet")
 	return nil
 }
 

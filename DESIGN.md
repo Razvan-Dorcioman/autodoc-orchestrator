@@ -36,7 +36,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | add route | det | Template-insert `GET /openapi.json` (see below); checked by the orchestrator (`route.json`), no test added to the repo | — |
 | Docs agent | LLM | Eight `docs/` pages: overview, structure, request flow, API, business rules, errors, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (one page per turn) |
 | Gate B | det | See *Verification* | — |
-| Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | `read_file` |
+| Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | — (the cited code is in the message) |
 | commit | det | One separate commit on the branch; push / open MR only if a token is set; write run summary | git |
 
 CLI: `autodoc run --repo <url|path> [--main <file>] [--run-tests]` → working copy in a temp dir, output in `runs/<run-id>/`. Nothing about the target is configured: everything comes from its type-checked code.
@@ -54,7 +54,7 @@ CLI: `autodoc run --repo <url|path> [--main <file>] [--run-tests]` → working c
 
 - **Swagger agent:** one ADK session, one turn per handler: the message carries its route facts, the types it writes (transitively), the constants it uses with their enum siblings and the handler source; the instruction holds the rules and a short swaggo cheat sheet. Then one turn for the general info on `main`; failed gate reports come back as further turns. Never sees docs. Small context → fewer hallucinated params.
 - **Docs agent:** one session per page, so a prompt fits a 16k local context and gate B's issues for a page go back to the session that wrote it. The message carries the page's brief, the facts gate B requires it to mention, and the slice of `facts.json` it is written from (the verified spec for the API page); `read_file` for details (the functions handlers call, middleware, Makefile, Dockerfile). It is told to cite `file:symbol` for every non-trivial claim.
-- **Judge:** one claim + its cited snippet per call. Cheap, focused, and the verdict is attributable to a specific line of code.
+- **Judge:** one claim + its cited snippet per call, in a fresh session. Cheap, focused, and the verdict is attributable to a specific line of code. The split is deterministic: a claim is a line (sentence, bullet or table row) citing (in backticks or `[…]`) `file:symbol`, `file:line`, `pkg.Symbol`, `make x` or `METHOD /path` (its handler); a line without a citation inherits its parent list item's, else its section heading's. The snippet is the cited declaration plus the package's consts, vars and types it uses, with `// @` lines removed (LLM-written, so not evidence). Uncited prose lines are not judged, only listed in `judge.json`.
 - Deterministic steps pass artifacts (`facts.json`, spec, gate reports) — agents never get raw logs of earlier steps.
 
 ## Verification
@@ -69,11 +69,11 @@ Deterministic (all must pass):
 - **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the one route line changed; the docs step changes only its pages.
 
 Model-judged:
-- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged.
+- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged. Only *unsupported* fails; *unverifiable* (the cited code doesn't decide it) is reported. Budget: 60 claims per pass, riskiest first (checklist words, numbers, rule pages); the rest are reported as skipped. Verdicts are cached by line + snippet, so a re-check after a fix judges only what changed. Gate B and the judge share the ≤2 docs attempts; after a fix gate B must pass again before the judge runs.
 
 **On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git checkout -- .` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
-**Stop conditions:** all gates green; retry limit reached; token/cost budget exceeded; per-agent tool-call cap reached.
+**Stop conditions:** all gates green; retry limit reached; token/cost budget exceeded; per-agent tool-call cap reached; judge claim budget reached (remaining claims skipped).
 
 ## Re-runnability
 
