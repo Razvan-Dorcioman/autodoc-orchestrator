@@ -33,9 +33,11 @@ import (
 const swaggerAttempts = 3
 
 // gateBAttempts is how many times gate B may run in a row before the run
-// gives up: the first attempt plus one retry with each page's issues fed back
-// to the session that wrote it. It starts over after each judge fix.
-const gateBAttempts = 2
+// gives up: the first attempt plus two retries with each page's issues fed
+// back to the session that wrote it, as for gate A: a fix turn that rewrites
+// a whole page often fixes most issues but not all. It starts over after each
+// judge fix.
+const gateBAttempts = 3
 
 // judgeAttempts is how many judge passes the docs get: the first, then one
 // after its unsupported claims went back to the pages. The last pass is

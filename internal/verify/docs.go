@@ -479,7 +479,8 @@ func (k *known) check(page string, doc mdDoc) []Issue {
 		}
 	}
 	if len(broken) > 0 {
-		add(first, "%d link(s) do not resolve from %s/: %s. Cite code in backticks as `path/from/root.go:Symbol` instead of linking it; "+
+		add(first, "%d link(s) do not resolve from %s/: %s. Remove each of these links and keep its text: a citation is not a link, "+
+			"and it starts with a file of the repository, in backticks, e.g. `go.mod` or `path/from/root.go:Symbol`; "+
 			"use links only for the other pages, e.g. [API](api.md)", len(broken), tools.DocsDir, strings.Join(broken, ", "))
 	}
 	return out

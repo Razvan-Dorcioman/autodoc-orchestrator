@@ -53,7 +53,9 @@ Citations: back every non-trivial claim with a citation in backticks: the file's
 root, a colon and a symbol declared in that file, for example ` + "`internal/shop/orders.go:(*Store).Get`" + `,
 ` + "`internal/shop/orders.go:maxItems`" + ` or ` + "`Makefile:test`" + `. A deterministic gate checks every citation, every
 file path, every ` + "`METHOD /path`" + `, every ` + "`make <target>`" + ` and every environment variable you write in
-backticks or code blocks, so use only ones that exist.
+backticks or code blocks, so use only ones that exist. A citation always starts with a file of the repository;
+the section names in this message (such as "Module" or "Server settings") are not files, so cite the file a fact
+comes from: its pos, or for the module and Go version ` + "`go.mod`" + `.
 
 The message lists facts the page must mention: name each with the exact spelling given, in backticks, and
 explain it.
@@ -85,7 +87,7 @@ var pages = map[string]page{
 			"how to run it locally, and a list of the other pages with one line each. Read README.md if the repository has one.",
 		facts: func(a *Agent) []section {
 			return []section{
-				{"Module", map[string]string{"module": a.facts.Module, "go_version": a.facts.GoVersion}},
+				{"Module (from go.mod; cite it as `go.mod`)", map[string]string{"module": a.facts.Module, "go_version": a.facts.GoVersion}},
 				{"Commands (main packages)", a.facts.Mains},
 				{"Packages", packageBriefs(a.facts, false)},
 				{"Routes", routeBriefs(a.facts)},
@@ -215,7 +217,7 @@ var pages = map[string]page{
 			"what it runs; building and running the container image; the Go version.",
 		facts: func(a *Agent) []section {
 			return []section{
-				{"Module", map[string]string{"module": a.facts.Module, "go_version": a.facts.GoVersion}},
+				{"Module (from go.mod; cite it as `go.mod`)", map[string]string{"module": a.facts.Module, "go_version": a.facts.GoVersion}},
 				{"Make targets", a.facts.MakeTargets},
 				{"Tests", a.facts.Tests},
 				{"Dockerfile", a.facts.Dockerfile},
