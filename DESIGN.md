@@ -74,7 +74,7 @@ Model-judged:
 
 **On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git reset --hard` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
-**Stop conditions:** all gates green; retry limit reached; token/cost budget exceeded; per-agent tool-call cap reached; judge claim budget reached (remaining claims skipped).
+**Stop conditions:** all gates green; retry limit reached; run token budget used up (`AUTODOC_TOKEN_BUDGET`, default 1M: every agent together, as the trace counts tokens, checked before each model call; catalog-poc runs used up to ~270k), which fails the running step and resets like a gate failure; per-agent model-call cap (25) reached; judge claim budget reached (remaining claims skipped).
 
 ## Re-runnability
 
@@ -108,6 +108,5 @@ Model-judged:
 
 ## Open items
 
-- Hard per-run token/cost budget value (TBD).
 - Opening an MR/PR after the push.
 - How AI coding assistants were used to build the orchestrator (to fill in at the end).

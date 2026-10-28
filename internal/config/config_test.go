@@ -13,7 +13,7 @@ func clearEnv(t *testing.T) {
 	t.Helper()
 	for _, k := range []string{
 		"AUTODOC_PROVIDER", "AUTODOC_LOCAL_URL", "AUTODOC_LOCAL_API_KEY", "AUTODOC_HTTP_TIMEOUT",
-		"AUTODOC_AGENT_MODEL", "AUTODOC_JUDGE_MODEL", "GOOGLE_API_KEY",
+		"AUTODOC_AGENT_MODEL", "AUTODOC_JUDGE_MODEL", "GOOGLE_API_KEY", "AUTODOC_TOKEN_BUDGET", "AUTODOC_GIT_TOKEN",
 	} {
 		t.Setenv(k, "")
 	}
@@ -32,6 +32,9 @@ func TestLoadDefaultsToLocal(t *testing.T) {
 	if !slices.Equal(cfg.AgentModels, defaultLocalModels) || !slices.Equal(cfg.JudgeModels, defaultLocalModels) {
 		t.Errorf("models = %v / %v, want the local default", cfg.AgentModels, cfg.JudgeModels)
 	}
+	if cfg.TokenBudget != defaultTokenBudget || cfg.GitToken != "" {
+		t.Errorf("token budget %d, git token %q", cfg.TokenBudget, cfg.GitToken)
+	}
 }
 
 func TestLoadLocalOverrides(t *testing.T) {
@@ -39,6 +42,7 @@ func TestLoadLocalOverrides(t *testing.T) {
 	t.Setenv("AUTODOC_LOCAL_URL", "http://gpu-box:8080/v1")
 	t.Setenv("AUTODOC_HTTP_TIMEOUT", "30m")
 	t.Setenv("AUTODOC_AGENT_MODEL", "gpt-oss:20b, qwen3:14b")
+	t.Setenv("AUTODOC_TOKEN_BUDGET", "500_000")
 	cfg, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -48,6 +52,9 @@ func TestLoadLocalOverrides(t *testing.T) {
 	}
 	if want := []string{"gpt-oss:20b", "qwen3:14b"}; !slices.Equal(cfg.AgentModels, want) {
 		t.Errorf("agent models = %v, want %v", cfg.AgentModels, want)
+	}
+	if cfg.TokenBudget != 500000 {
+		t.Errorf("token budget = %d", cfg.TokenBudget)
 	}
 }
 
@@ -76,6 +83,8 @@ func TestLoadRejectsBadSettings(t *testing.T) {
 		"unknown provider": {"AUTODOC_PROVIDER": "openai"},
 		"bad timeout":      {"AUTODOC_HTTP_TIMEOUT": "soon"},
 		"zero timeout":     {"AUTODOC_HTTP_TIMEOUT": "0s"},
+		"bad budget":       {"AUTODOC_TOKEN_BUDGET": "1M"},
+		"negative budget":  {"AUTODOC_TOKEN_BUDGET": "-1"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			clearEnv(t)

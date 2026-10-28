@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,9 @@ const (
 	placeholderLocalKey = "local"
 	// A local model may load from disk and then generate on a small GPU for minutes.
 	defaultLocalTimeout = 10 * time.Minute
+	// Runs on catalog-poc used up to about 270k tokens, so this leaves room
+	// for retries and fallbacks but stops a run that loops.
+	defaultTokenBudget = 1_000_000
 )
 
 // Config holds everything the orchestrator needs from the environment.
@@ -35,6 +39,7 @@ type Config struct {
 	AgentModels []string // AUTODOC_AGENT_MODEL: swagger and docs agents, comma-separated fallback chain
 	JudgeModels []string // AUTODOC_JUDGE_MODEL: grounding judge, comma-separated fallback chain
 	MaxCalls    int      // model calls allowed per agent before it is stopped
+	TokenBudget int      // AUTODOC_TOKEN_BUDGET: tokens the whole run may use, every agent together; 0 means no limit
 	GitToken    string   // AUTODOC_GIT_TOKEN: when set, the run branch is pushed to the https origin with it
 }
 
@@ -76,6 +81,15 @@ func Load() (Config, error) {
 			return Config{}, fmt.Errorf("AUTODOC_HTTP_TIMEOUT=%q is not a positive duration such as 90s or 15m", s)
 		}
 		cfg.Provider.Timeout = d
+	}
+
+	cfg.TokenBudget = defaultTokenBudget
+	if s := strings.TrimSpace(os.Getenv("AUTODOC_TOKEN_BUDGET")); s != "" {
+		n, err := strconv.Atoi(strings.ReplaceAll(s, "_", ""))
+		if err != nil || n < 0 {
+			return Config{}, fmt.Errorf("AUTODOC_TOKEN_BUDGET=%q is not a token count such as 500000 (0 for no limit)", s)
+		}
+		cfg.TokenBudget = n
 	}
 
 	cfg.AgentModels = listOr("AUTODOC_AGENT_MODEL", agentDefault)

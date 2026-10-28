@@ -133,6 +133,8 @@ type Judge struct {
 	verdicts map[string]Result
 	sessions int
 	budget   int // MaxClaims, lowered in tests
+
+	tokenBudget int // the run's, shared with the other agents
 }
 
 // New builds the judge on cfg.JudgeModels.
@@ -141,7 +143,7 @@ func New(ctx context.Context, cfg config.Config, rec *trace.Recorder) (*Judge, e
 	if err != nil {
 		return nil, err
 	}
-	return &Judge{rec: rec, model: m, verdicts: map[string]Result{}, budget: MaxClaims}, nil
+	return &Judge{rec: rec, model: m, verdicts: map[string]Result{}, budget: MaxClaims, tokenBudget: cfg.TokenBudget}, nil
 }
 
 // Check splits the pages under dir into claims and judges at most MaxClaims
@@ -201,7 +203,7 @@ func (j *Judge) runner() (*runner.Runner, error) {
 		// A provider, not Instruction: ADK would read the JSON braces as session-state placeholders.
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) { return instruction, nil },
 	}
-	hooks := &llm.Hooks{Rec: j.rec, Step: Step, Model: j.model, MaxCalls: 2 * j.budget}
+	hooks := &llm.Hooks{Rec: j.rec, Step: Step, Model: j.model, MaxCalls: 2 * j.budget, TokenBudget: j.tokenBudget}
 	hooks.Apply(&agentCfg)
 	a, err := llmagent.New(agentCfg)
 	if err != nil {

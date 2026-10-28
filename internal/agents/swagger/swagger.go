@@ -128,7 +128,7 @@ func New(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir, mainF
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) { return instruction, nil },
 		Tools:               []tool.Tool{readFile, getFacts, patch},
 	}
-	hooks := &llm.Hooks{Rec: rec, Step: Step, Model: m, MaxCalls: cfg.MaxCalls}
+	hooks := &llm.Hooks{Rec: rec, Step: Step, Model: m, MaxCalls: cfg.MaxCalls, TokenBudget: cfg.TokenBudget}
 	hooks.Apply(&agentCfg)
 	a, err := llmagent.New(agentCfg)
 	if err != nil {

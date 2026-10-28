@@ -353,7 +353,7 @@ func (a *Agent) session(p string) (*pageSession, error) {
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) { return instruction, nil },
 		Tools:               a.tools,
 	}
-	hooks := &llm.Hooks{Rec: a.rec, Step: Step, Model: a.model, MaxCalls: a.cfg.MaxCalls}
+	hooks := &llm.Hooks{Rec: a.rec, Step: Step, Model: a.model, MaxCalls: a.cfg.MaxCalls, TokenBudget: a.cfg.TokenBudget}
 	hooks.Apply(&agentCfg)
 	ag, err := llmagent.New(agentCfg)
 	if err != nil {

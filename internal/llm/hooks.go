@@ -5,6 +5,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"sync"
@@ -80,13 +81,20 @@ func NewModelChain(ctx context.Context, names []string, p Provider, rec *trace.R
 	return NewFallback(models, rec)
 }
 
+// ErrTokenBudget ends an agent's run once the whole run has used its token
+// budget.
+var ErrTokenBudget = errors.New("run token budget exceeded")
+
 // Hooks records one agent's model and tool calls in the trace and stops the
-// agent once it has made MaxCalls model calls.
+// agent once it has made MaxCalls model calls, or once the run, every agent
+// together, has used TokenBudget tokens (as the trace counts them). Zero
+// means no limit.
 type Hooks struct {
-	Rec      *trace.Recorder
-	Step     string
-	Model    model.LLM // logged by Name(), so a fallback shows the model actually used
-	MaxCalls int
+	Rec         *trace.Recorder
+	Step        string
+	Model       model.LLM // logged by Name(), so a fallback shows the model actually used
+	MaxCalls    int
+	TokenBudget int
 
 	mu    sync.Mutex
 	calls int
@@ -111,9 +119,13 @@ func (h *Hooks) onModelError(ctx agent.Context, _ *model.LLMRequest, err error) 
 	return nil, nil
 }
 
-// beforeModel enforces the call cap. Returning an error skips the model call
-// and ends the agent's run with that error.
+// beforeModel enforces the call cap and the token budget. Returning an error
+// skips the model call and ends the agent's run with that error. The budget
+// is checked before a call, so the call that crosses it still completes.
 func (h *Hooks) beforeModel(_ agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+	if used := h.Rec.Totals().TotalTokens; h.TokenBudget > 0 && used >= h.TokenBudget {
+		return nil, fmt.Errorf("%s: %w: %d of %d tokens used (AUTODOC_TOKEN_BUDGET)", h.Step, ErrTokenBudget, used, h.TokenBudget)
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if h.MaxCalls > 0 && h.calls >= h.MaxCalls {
@@ -144,6 +156,9 @@ func (h *Hooks) afterModel(ctx agent.Context, resp *model.LLMResponse, respErr e
 			e.OutputTokens = int(u.CandidatesTokenCount)
 			e.ThoughtTokens = int(u.ThoughtsTokenCount)
 			e.TotalTokens = int(u.TotalTokenCount)
+			if e.TotalTokens == 0 { // some OpenAI-compatible servers leave the total out
+				e.TotalTokens = e.InputTokens + e.OutputTokens + e.ThoughtTokens
+			}
 		}
 	}
 	h.Rec.Emit(e)
