@@ -21,7 +21,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
                               └─ errors (≤3) ──┘                                  └─ ≤3 / 2 ────┴────────┘
 ```
 
-`fetch` clones into `runs/<id>/work` (never touching the original) on branch `autodoc/<base-sha>`, requires a green baseline build and hashes every file. `index` also plans the extra route and rejects a repo with its own spec, so unsupported services fail before any LLM call. `strip` removes old annotations for idempotent re-runs; `reindex` refreshes line numbers after annotation. The docs agent writes eight `docs/` pages. `commit` re-checks staged paths, makes one commit and optionally pushes (`AUTODOC_GIT_TOKEN`, never in args or config).
+`fetch` clones into `runs/<id>/work` (never touching the original) on branch `autodoc/<base-sha>`, requires a green baseline build and hashes every file. `index` also plans the extra route and rejects a repo with its own spec, so unsupported services fail before any LLM call. `strip` removes old annotations for idempotent re-runs; `reindex` refreshes line numbers after annotation. The docs agent writes eight `docs/` pages. `commit` re-checks staged paths and makes one commit, which is pushed back to the target as branch `autodoc/<base-sha>`: always into a local repo (its working tree untouched), to a URL only with `AUTODOC_GIT_TOKEN` (never in args or config).
 
 **The extra route** is the only intended behaviour change: `internal/apispec/` `go:embed`s the generated spec, and the route-registering function gains one `mux.Handle("GET /openapi.json", apispec.Handler())` line plus the import. Template, not LLM; stdlib only.
 

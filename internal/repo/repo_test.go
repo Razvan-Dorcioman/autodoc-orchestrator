@@ -156,3 +156,53 @@ func TestPushNeedsHTTPSAndHidesTheToken(t *testing.T) {
 		t.Errorf("the token header was written to .git/config:\n%s", cfg)
 	}
 }
+
+func TestPushLocalAddsOnlyTheBranch(t *testing.T) {
+	ctx := context.Background()
+	src := t.TempDir()
+	mustGit(t, src, "init", "--quiet", "-b", "main")
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("a\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	mustGit(t, src, "add", ".")
+	mustGit(t, src, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "init")
+	// Uncommitted work in the source must survive the push.
+	if err := os.WriteFile(filepath.Join(src, "a.txt"), []byte("wip\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	push := func() string {
+		t.Helper()
+		r, err := Prepare(ctx, src, filepath.Join(t.TempDir(), "work"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(r.Dir, "b.txt"), []byte("b\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		sha, _, err := Commit(ctx, r.Dir, "add b", func(string) bool { return true })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := PushLocal(ctx, r.Dir, r.Branch); err != nil {
+			t.Fatal(err)
+		}
+		if got := mustGit(t, src, "rev-parse", r.Branch); got != sha {
+			t.Errorf("%s in the source = %s, want the run's commit %s", r.Branch, got, sha)
+		}
+		return sha
+	}
+	first := push()
+	if second := push(); second == first {
+		t.Errorf("the second run's commit %s equals the first's", second)
+	}
+	if got := mustGit(t, src, "branch", "--show-current"); got != "main" {
+		t.Errorf("source checked out %q, want main", got)
+	}
+	if data, _ := os.ReadFile(filepath.Join(src, "a.txt")); string(data) != "wip\n" {
+		t.Errorf("a.txt in the source = %q, want the uncommitted edit kept", data)
+	}
+	if _, err := os.Stat(filepath.Join(src, "b.txt")); err == nil {
+		t.Error("b.txt appeared in the source's working tree")
+	}
+}

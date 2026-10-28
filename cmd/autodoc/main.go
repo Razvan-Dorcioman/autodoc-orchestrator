@@ -109,7 +109,7 @@ func cmdRun(ctx context.Context, args []string) error {
 	case res.Commit == "":
 		fmt.Println("nothing to commit: the result equals the base commit")
 	default:
-		fmt.Println("not pushed: set AUTODOC_GIT_TOKEN to push the branch")
+		fmt.Println("not pushed: the branch is only in", res.Repo.Dir, "- set AUTODOC_GIT_TOKEN to push it to", res.Repo.Source)
 	}
 	return nil
 }

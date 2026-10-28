@@ -1,4 +1,4 @@
-// Package repo clones or opens the target repository, creates the run branch, commits the result and optionally pushes it.
+// Package repo clones or opens the target repository, creates the run branch, commits the result and pushes it back.
 package repo
 
 import (
@@ -22,7 +22,8 @@ type Repo struct {
 
 // Prepare clones src (a git URL or a local repository path) into dir and
 // checks out a new branch autodoc/<short base sha>. A local path is cloned
-// too, so the original checkout is never modified.
+// too, so the run never works in the original checkout: the result reaches
+// it only as that branch, through PushLocal.
 func Prepare(ctx context.Context, src, dir string) (*Repo, error) {
 	// Check out the exact bytes in the repository: no CRLF conversion on Windows,
 	// so hashes, gofmt and generated files are the same on every OS.
@@ -113,6 +114,30 @@ func Push(ctx context.Context, dir, branch, token string) (string, error) {
 		return url, errors.New(strings.ReplaceAll(err.Error(), token, "***"))
 	}
 	return url, nil
+}
+
+// IsLocal reports whether src, as given to Prepare, is a repository on disk
+// rather than a URL.
+func IsLocal(src string) bool {
+	fi, err := os.Stat(src)
+	return err == nil && fi.IsDir()
+}
+
+// PushLocal pushes branch to origin, a repository on disk, and returns
+// origin's path. Only the branch ref and its objects are written there: the
+// working tree, the index and the checked-out branch stay as they are, and
+// git refuses the push if branch itself is checked out. As with Push, a later
+// run on the same base replaces the branch unless it moved since the clone.
+func PushLocal(ctx context.Context, dir, branch string) (string, error) {
+	path, err := Git(ctx, dir, "remote", "get-url", "origin")
+	if err != nil {
+		return "", err
+	}
+	if !IsLocal(path) {
+		return path, fmt.Errorf("origin %s is not a repository on disk", path)
+	}
+	_, err = Git(ctx, dir, "push", "--quiet", "--force-with-lease", "origin", branch)
+	return path, err
 }
 
 // Show returns the content of path (a slash path) at rev, byte for byte.

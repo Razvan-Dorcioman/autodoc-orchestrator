@@ -23,7 +23,11 @@ From this repo's root, against a fresh clone of catalog-poc (a git URL or a loca
 go run ./cmd/autodoc run --repo <catalog-poc git URL or path>
 ```
 
-The target is cloned into the run's own directory; the clone you pass is never changed.
+The target is cloned into the run's own directory, and the result comes back to it as one
+commit on a new branch `autodoc/<base sha>`, so `git diff <base>..autodoc/<base sha>` shows
+exactly what the run added. For a local path the branch is pushed into that repository on
+every run: its working tree and checked-out branch are left alone. For a git URL it is pushed
+only with `AUTODOC_GIT_TOKEN`.
 With Gemini, for example:
 
 ```bash
@@ -57,7 +61,7 @@ over `.env`). Copy [.env.example](.env.example) to `.env` to start.
 | `AUTODOC_JUDGE_MODEL` | no | local: `qwen3:14b`; gemini: `gemini-pro-latest,gemini-3.1-pro-preview,gemini-3.8-flash` | grounding judge; same format |
 | `AUTODOC_HTTP_TIMEOUT` | no | `10m` for `local`, `90s` for `gemini` | timeout per HTTP attempt to the model, a Go duration such as `90s` |
 | `AUTODOC_TOKEN_BUDGET` | no | `1000000` | tokens the whole run may use, all agents together; `0` for no limit |
-| `AUTODOC_GIT_TOKEN` | no | — | when set, pushes the run branch to the cloned https origin; without it nothing leaves the machine |
+| `AUTODOC_GIT_TOKEN` | no | — | when set, pushes the run branch to the https URL given as `--repo`; without it nothing leaves the machine (a local `--repo` gets the branch either way) |
 
 ## Outputs
 
@@ -67,5 +71,5 @@ Each run gets `runs/<run-id>/` (or under `--runs-dir`); the command prints its p
 - `summary.json`: status, totals (calls, tokens), each step's outcome
 - `baseline.json`, `facts.json`, `facts_annotated.json`, `gate_a.json`, `route.json`, `gate_b.json`, `judge.json`: per-step inputs and reports
 - `work/`: the target's working copy. The result is committed there on branch
-  `autodoc/<base sha>`: annotations in the handlers, the spec in `internal/apispec/`
+  `autodoc/<base sha>`, then pushed to the target repo (see Run): annotations in the handlers, the spec in `internal/apispec/`
   (`swagger.json`, `swagger.yaml`), the route serving it, and the pages in `docs/`

@@ -65,7 +65,7 @@ type Result struct {
 	SpecGaps  []verify.Issue  // param constraints gate A's last attempt still found missing or wrong, committed for review
 	Commit    string          // the run's commit on Repo.Branch; empty when nothing changed
 	Files     []string        // the paths it changed
-	PushedTo  string          // origin's URL, once the branch is pushed
+	PushedTo  string          // the target repo's URL or path, once the branch is pushed there
 }
 
 // Outcome is what summary.json records of the result.
@@ -288,10 +288,20 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	}
 	res.Judge = filepath.Join(rec.Dir(), "judge.json")
 
-	// The commit stays on the local branch whatever happens here.
-	if cfg.GitToken != "" && res.Commit != "" {
+	// The commit is on the run branch in workDir whatever happens here. It
+	// goes back to the target repo: to a local one always, to a remote one
+	// only with a token, since nothing leaves the machine without it.
+	var push func() (string, error)
+	switch {
+	case res.Commit == "":
+	case repo.IsLocal(res.Repo.Source):
+		push = func() (string, error) { return repo.PushLocal(ctx, workDir, res.Repo.Branch) }
+	case cfg.GitToken != "":
+		push = func() (string, error) { return repo.Push(ctx, workDir, res.Repo.Branch, cfg.GitToken) }
+	}
+	if push != nil {
 		err = step(rec, "push", func() (string, error) {
-			url, err := repo.Push(ctx, workDir, res.Repo.Branch, cfg.GitToken)
+			url, err := push()
 			if err != nil {
 				return "", err
 			}
