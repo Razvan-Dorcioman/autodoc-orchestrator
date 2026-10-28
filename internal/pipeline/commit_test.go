@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"autodoc/internal/gofacts"
 	"autodoc/internal/repo"
 	"autodoc/internal/trace"
 )
@@ -88,5 +89,41 @@ func TestCommit(t *testing.T) {
 	}
 	if o := res.outcome(); o.Commit != res.Commit || o.Branch != r.Branch || o.PushedTo != "" {
 		t.Errorf("outcome = %+v", o)
+	}
+}
+
+// TestReindex: annotations above a handler move it down; the re-extracted
+// facts carry the new position, and a change to the routes is refused.
+func TestReindex(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	if err := os.CopyFS(dir, os.DirFS("../gofacts/testdata/svc")); err != nil {
+		t.Fatal(err)
+	}
+	before, err := gofacts.Extract(ctx, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file := filepath.Join(dir, "internal", "api", "api.go")
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotated := strings.Replace(string(data), "\nfunc index(", "\n// @Summary List items\n// @Router / [get]\nfunc index(", 1)
+	if err := os.WriteFile(file, []byte(annotated), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	after, err := reindex(ctx, dir, before, filepath.Join(t.TempDir(), "facts.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, a := before.Routes[0].HandlerPos, after.Routes[0].HandlerPos; b != "internal/api/api.go:51" || a != "internal/api/api.go:53" {
+		t.Errorf("index handler at %s before, %s after; want 51 and 53", b, a)
+	}
+
+	before.Routes = before.Routes[1:]
+	if _, err := reindex(ctx, dir, before, filepath.Join(t.TempDir(), "facts.json")); err == nil || !strings.Contains(err.Error(), "routes changed") {
+		t.Errorf("changed routes: err = %v", err)
 	}
 }

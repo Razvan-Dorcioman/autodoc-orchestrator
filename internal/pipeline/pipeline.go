@@ -217,6 +217,17 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		})
 	}
 	if err == nil {
+		// The annotations moved every line below them, so the docs, gate B and
+		// the judge need the positions of the code as it is now.
+		err = step(rec, "reindex", func() (string, error) {
+			facts, err = reindex(ctx, workDir, facts, filepath.Join(rec.Dir(), "facts_annotated.json"))
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("%d routes at their annotated positions", len(facts.Routes)), nil
+		})
+	}
+	if err == nil {
 		err = step(rec, docs.Step, func() (string, error) {
 			return document(ctx, cfg, rec, workDir, facts)
 		})
@@ -435,6 +446,28 @@ func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir s
 			}
 		}
 	}
+}
+
+// reindex extracts the facts again from the annotated working copy and
+// writes them to path. Only comments changed, so the routes must be the
+// same ones, by pattern and handler, as before; only positions may differ.
+func reindex(ctx context.Context, dir string, before *gofacts.Facts, path string) (*gofacts.Facts, error) {
+	f, err := gofacts.Extract(ctx, dir)
+	if err != nil {
+		return nil, err
+	}
+	f.Routes = slices.DeleteFunc(f.Routes, specroute.Own)
+	key := func(rs []gofacts.Route) []string {
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.Pattern+" "+r.Handler)
+		}
+		return out
+	}
+	if a, b := key(before.Routes), key(f.Routes); !slices.Equal(a, b) {
+		return nil, fmt.Errorf("the routes changed while only comments did: %v before, %v now", a, b)
+	}
+	return f, writeJSON(path, f)
 }
 
 // issuesByPage groups issues by the page their Where names, so each goes

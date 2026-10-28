@@ -20,10 +20,10 @@ Orchestrator that points at any Go HTTP service (developed against `catalog-poc`
 ## Flow
 
 ```
-fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add route ─► DOCS AGENT ─► gate B ─► JUDGE ─► commit
- det      det      det      LLM (Flash)      det        det         LLM (Flash)    det     LLM (Pro)   det
-                              ▲                │                      ▲             │        │
-                              └─ errors (≤3) ──┘                      └─ errors (≤2)┴────────┘
+fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add route ─► reindex ─► DOCS AGENT ─► gate B ─► JUDGE ─► commit
+ det      det      det      LLM (Flash)      det        det          det       LLM (Flash)    det     LLM (Pro)   det
+                              ▲                │                                  ▲             │        │
+                              └─ errors (≤3) ──┘                                  └─ errors (≤2)┴────────┘
 ```
 
 | Step | Kind | Responsibility | Tools |
@@ -34,6 +34,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | Swagger agent | LLM | swaggo `// @` annotations on every route handler + general API info on that command's `main` | `read_file`, `get_facts`, `patch_comment` |
 | Gate A | det | See *Verification*; structured errors fed back to the agent | go, swag |
 | add route | det | Template-insert `GET /openapi.json` (see below); checked by the orchestrator (`route.json`), no test added to the repo | — |
+| reindex | det | Re-extract `facts.json` from the annotated copy (`facts_annotated.json`): the `// @` lines moved every line below them, and the docs, gate B and the judge cite and check current positions. The routes must be the same ones; only positions may change | — |
 | Docs agent | LLM | Eight `docs/` pages: overview, structure, request flow, API, business rules, errors, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (one page per turn) |
 | Gate B | det | See *Verification* | — |
 | Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | — (the cited code is in the message) |
