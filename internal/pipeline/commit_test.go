@@ -7,9 +7,11 @@ import (
 	"strings"
 	"testing"
 
+	"autodoc/internal/agents/judge"
 	"autodoc/internal/gofacts"
 	"autodoc/internal/repo"
 	"autodoc/internal/trace"
+	"autodoc/internal/verify"
 )
 
 func TestCommit(t *testing.T) {
@@ -68,6 +70,7 @@ func TestCommit(t *testing.T) {
 	write(r.Dir, "main.go", "package main\n\n// @title X\nfunc main() {}\n")
 	write(r.Dir, "internal/apispec/swagger.json", "{}\n")
 	write(r.Dir, "docs/api.md", "# API\n")
+	res.Unchecked = []judge.Result{{Claim: verify.Claim{Page: "docs/api.md", Line: 3}, Verdict: judge.Unsupported, Reason: "the code returns ok, not OK"}}
 	detail, err := commit(ctx, rec, res)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +82,8 @@ func TestCommit(t *testing.T) {
 		t.Errorf("committed on %q, want %q", branch, r.Branch)
 	}
 	msg := git(r.Dir, "log", "-1", "--format=%B")
-	for _, want := range []string{"Add API annotations, OpenAPI spec and docs", r.BaseSHA, "Run: " + rec.RunID()} {
+	for _, want := range []string{"Add API annotations, OpenAPI spec and docs", r.BaseSHA, "Run: " + rec.RunID(),
+		"still found 1 claim(s)", "- docs/api.md:3: the code returns ok, not OK"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message lacks %q:\n%s", want, msg)
 		}
@@ -87,7 +91,8 @@ func TestCommit(t *testing.T) {
 	if git(src, "branch", "--list", r.Branch) != "" {
 		t.Error("the run branch reached the source repository without a push")
 	}
-	if o := res.outcome(); o.Commit != res.Commit || o.Branch != r.Branch || o.PushedTo != "" {
+	if o := res.outcome(); o.Commit != res.Commit || o.Branch != r.Branch || o.PushedTo != "" ||
+		len(o.Unsupported) != 1 || o.Unsupported[0] != "docs/api.md:3: the code returns ok, not OK" {
 		t.Errorf("outcome = %+v", o)
 	}
 }

@@ -92,11 +92,23 @@ type Report struct {
 	Verdicts   map[string]int   `json:"verdicts"`
 	Uncited    map[string][]int `json:"uncited_lines,omitempty"` // prose lines with no code to check against, per page
 	DurationMS int64            `json:"duration_ms"`
+	Advisory   bool             `json:"advisory,omitempty"` // the last pass: its unsupported claims did not fail the run
 	Results    []Result         `json:"results"`
 }
 
 // OK reports whether no claim was found unsupported.
 func (r Report) OK() bool { return r.Verdicts[Unsupported] == 0 }
+
+// Unsupported returns the claims found unsupported, in page order.
+func (r Report) Unsupported() []Result {
+	var out []Result
+	for _, res := range r.Results {
+		if res.Verdict == Unsupported {
+			out = append(out, res)
+		}
+	}
+	return out
+}
 
 // Summary is one line for the trace and the step's end.
 func (r Report) Summary() string {

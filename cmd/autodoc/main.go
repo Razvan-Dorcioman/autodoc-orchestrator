@@ -98,6 +98,9 @@ func cmdRun(ctx context.Context, args []string) error {
 	fmt.Println("spec route:", res.Route)
 	fmt.Println("docs:", filepath.Dir(res.Docs[0]))
 	fmt.Println("judge:", res.Judge)
+	if n := len(res.Unchecked); n > 0 {
+		fmt.Printf("to review: the judge's last pass still finds %d claim(s) unsupported; they are committed and listed in judge.json and the commit message\n", n)
+	}
 	switch {
 	case res.PushedTo != "":
 		fmt.Println("pushed:", res.Repo.Branch, "to", res.PushedTo)
