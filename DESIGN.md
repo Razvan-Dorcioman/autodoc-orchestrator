@@ -55,16 +55,30 @@ Everything generated is regenerated each run, so an unchanged service gives a ne
 - Quality is only as good as the judge; it can't judge readability or fitness for a new engineer.
 - Only stdlib `net/http` routing (chi/gin/echo need extractors); non-constant patterns, statuses or param names are missed; form, multipart and header inputs aren't extracted.
 - Swagger 2.0: no `oneOf` (`any` fields are free-form objects); no struct tags means no per-field examples or `required`; `ServeMux` 404/405 only in prose.
-- Regenerate, not update: wording churns between runs. `swag` needs network on first run. Single repo, Go only, no incremental mode, no MR.
+- Regenerate, not update, until incremental runs land (planned below): wording churns between runs. `swag` needs network on first run. Single repo, Go only, no MR.
 
 ## With one more week
 
 - Golden evaluation set: expected facts and questions answered from the docs alone, scored automatically — measures *good*, not just *valid*.
 - MR mode: changed packages only, gate report and judge verdicts as an MR comment.
-- Cross-run cache: reuse judge verdicts (then annotations and pages) whose model, prompt and input hash are unchanged, saved only from committed runs and re-gated on reuse, so an unchanged service re-runs with near-zero model calls.
+- Incremental runs, as planned below.
 - Monorepo scale: per-package fan-out, docs per service + index.
 - Contract tests: call the running service with spec-generated requests and compare responses.
 - OTel/Langfuse exporter on top of the JSONL trace.
+
+## Incremental runs (planned)
+
+A re-run redoes only the model-written units whose inputs changed: a handler's annotations, `main`'s API info, a docs page, a judge verdict. **Content fingerprints, not `git diff`:** a handler depends on types in other files, moved code changes nothing, a new prompt or model stales unchanged code, and the last output may be on an unmerged branch.
+
+- **Previous run:** the manifest in HEAD if the branch was merged, else on the `origin/autodoc/*` branch whose base is the nearest ancestor (clone fetches them); none, or `--full`, runs as today.
+- **Manifest:** `docs/.autodoc/manifest.json`, written only by committed runs just before `commit`: a key per agent (instruction, tool declarations, model chain, facts schema and swag versions; a change stales all its units), and per unit its input fingerprint, output hash and, for handlers, the annotation lines. In the repo, not `runs/`, so CI and other machines see it.
+- **Fingerprints,** line numbers stripped: for a handler, what `routeMessage` sends plus comment-free hashes of the handler and its `Calls`; for `main`, its file, README.md and package docs; for a page, `pageMessage`; for a claim, `cacheKey` without snippet line numbers. Each LLM session also records `(tool, args) → result hash` for `read_file`, `get_facts` and `get_spec`; these are pure, so the next run replays them and any changed result stales the unit.
+- **Flow:** a new `plan` step (no model calls; `plan.json`, previewable with `--plan`) marks each unit reuse / update / new / removed with the input that changed. `strip` stays total; a new deterministic `reapply` restores reused annotations; the swagger agent runs only for stale handlers, the docs agent only for stale pages (reused ones are copied), and the judge starts from earlier verdicts, re-judging *unsupported* ones. Gates A and B still run on everything: a reused unit they flag becomes stale and gets a fresh session.
+- **Update, not regenerate:** a stale unit gets its previous output and what changed and is asked for the smallest edit, so diffs stay readable; a full rewrite when its agent's key changed or most inputs did.
+- **Hand edits:** an output that no longer matches the manifest's hash was edited by a person; it becomes the previous output, kept or updated, never overwritten, re-gated and flagged in `summary.json`.
+- **Expected:** an unchanged service with a clean last run makes zero model calls and ends `unchanged`; `summary.json`, the trace and the commit message say what was reused and why.
+- **Order:** fingerprints and manifest (no behaviour change); `plan` and `--full`, checked on catalog-poc before trusted; judge cache (most calls, least risk); swagger reuse; docs reuse; update mode; hand edits.
+- **Trade-offs:** pages are coarse (any route change stales api.md; per-section units later); update mode can carry stale prose the gates don't see; a wrong reuse cannot pass gates A and B, but reused verdicts skip re-judging, so they are keyed on claim and code and kept only from committed runs.
 
 ## How AI assistants were used
 
