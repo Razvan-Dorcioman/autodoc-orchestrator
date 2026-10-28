@@ -60,6 +60,7 @@ type Result struct {
 	Docs      []string        // the documentation pages, once gate B is green and the judge has had its passes
 	Judge     string          // the judge's report
 	Unchecked []judge.Result  // claims the judge's last pass still found unsupported, committed for review
+	SpecGaps  []verify.Issue  // param constraints gate A's last attempt still found missing or wrong, committed for review
 	Commit    string          // the run's commit on Repo.Branch; empty when nothing changed
 	Files     []string        // the paths it changed
 	PushedTo  string          // origin's URL, once the branch is pushed
@@ -75,6 +76,16 @@ type Outcome struct {
 	PushedTo    string   `json:"pushed_to,omitempty"`
 	WorkDir     string   `json:"work_dir,omitempty"`
 	Unsupported []string `json:"unsupported_claims,omitempty"` // the judge's last pass, advisory: "page:line: reason"
+	SpecGaps    []string `json:"spec_constraints,omitempty"`   // gate A's last attempt, advisory: "where: message"
+}
+
+// issueLines renders the leftover constraint issues as "where: message".
+func issueLines(issues []verify.Issue) []string {
+	var out []string
+	for _, is := range issues {
+		out = append(out, is.Where+": "+is.Message)
+	}
+	return out
 }
 
 // claimLines renders the leftover claims as "page:line: reason".
@@ -87,7 +98,7 @@ func claimLines(claims []judge.Result) []string {
 }
 
 func (r *Result) outcome() Outcome {
-	o := Outcome{Commit: r.Commit, Files: r.Files, PushedTo: r.PushedTo, Unsupported: claimLines(r.Unchecked)}
+	o := Outcome{Commit: r.Commit, Files: r.Files, PushedTo: r.PushedTo, Unsupported: claimLines(r.Unchecked), SpecGaps: issueLines(r.SpecGaps)}
 	if r.Repo != nil {
 		o.Source, o.BaseSHA, o.Branch, o.WorkDir = r.Repo.Source, r.Repo.BaseSHA, r.Repo.Branch, r.Repo.Dir
 	}
@@ -213,7 +224,7 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	})
 	if err == nil {
 		err = step(rec, swagger.Step, func() (string, error) {
-			return annotate(ctx, cfg, rec, verify.GateAInput{
+			detail, left, err := annotate(ctx, cfg, rec, verify.GateAInput{
 				Dir:        workDir,
 				Main:       res.Main,
 				Baseline:   snap,
@@ -222,6 +233,8 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 				Original:   original,
 				Facts:      facts,
 			})
+			res.SpecGaps = left
+			return detail, err
 		})
 	}
 	if err == nil {
@@ -323,46 +336,62 @@ changed, apart from the line that registers that route.
 			fmt.Fprintf(&b, "- %s\n", l)
 		}
 	}
+	if len(res.SpecGaps) > 0 {
+		fmt.Fprintf(&b, "\nTo review: gate A's last attempt still found %d param constraint(s)\nmissing from the spec or different from the code (details in the run's gate_a.json):\n", len(res.SpecGaps))
+		for _, l := range issueLines(res.SpecGaps) {
+			fmt.Fprintf(&b, "- %s\n", l)
+		}
+	}
 	fmt.Fprintf(&b, "\nRun: %s\nModels: %s\n", rec.RunID(), strings.Join(models, ", "))
 	return b.String()
 }
 
 // annotate runs the swagger agent and gate A, feeding each failed gate
 // report back to the agent in the same session, at most swaggerAttempts times.
-func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, in verify.GateAInput) (string, error) {
+// On the last attempt, constraint issues alone do not fail the run: they are
+// returned, for the commit and the summary.
+func annotate(ctx context.Context, cfg config.Config, rec *trace.Recorder, in verify.GateAInput) (string, []verify.Issue, error) {
 	a, err := swagger.New(ctx, cfg, rec, in.Dir, in.Main, in.Facts)
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	if err := a.Annotate(ctx); err != nil {
-		return "", err
+		return "", nil, err
 	}
 	for attempt := 1; ; attempt++ {
 		start := time.Now()
 		rep := verify.GateA(ctx, in)
+		last := attempt == swaggerAttempts
+		rep.Advisory = last && !rep.OK() && len(rep.Blocking()) == 0
 		if err := writeJSON(filepath.Join(rec.Dir(), "gate_a.json"), rep); err != nil {
-			return "", err
+			return "", nil, err
 		}
 		e := trace.Event{
 			Type: trace.Gate, Step: "gate_a", LatencyMS: time.Since(start).Milliseconds(),
 			Detail: fmt.Sprintf("attempt %d of %d: %d issue(s)", attempt, swaggerAttempts, len(rep.Issues)),
 		}
+		if rep.Advisory {
+			e.Detail += "; advisory: only param constraints are left, the run goes on and reports them"
+		}
 		if !rep.OK() {
 			e.Error = rep.String()
 		}
 		rec.Emit(e)
-		if rep.OK() {
-			return fmt.Sprintf("gate A green on attempt %d of %d", attempt, swaggerAttempts), nil
-		}
-		if attempt == swaggerAttempts {
-			return "", fmt.Errorf("gate A still fails after %d attempts (report in gate_a.json):\n%s", attempt, rep)
+		switch {
+		case rep.OK():
+			return fmt.Sprintf("gate A green on attempt %d of %d", attempt, swaggerAttempts), nil, nil
+		case rep.Advisory:
+			return fmt.Sprintf("gate A green on attempt %d of %d but for %d param constraint(s), kept for review (gate_a.json)",
+				attempt, swaggerAttempts, len(rep.Issues)), rep.Issues, nil
+		case last:
+			return "", nil, fmt.Errorf("gate A still fails after %d attempts (report in gate_a.json):\n%s", attempt, rep)
 		}
 		rec.Emit(trace.Event{
 			Type: trace.Retry, Step: swagger.Step,
 			Detail: fmt.Sprintf("attempt %d of %d: %d gate A issue(s) sent back to the agent", attempt+1, swaggerAttempts, len(rep.Issues)),
 		})
 		if err := a.Fix(ctx, rep.String()); err != nil {
-			return "", err
+			return "", nil, err
 		}
 	}
 }

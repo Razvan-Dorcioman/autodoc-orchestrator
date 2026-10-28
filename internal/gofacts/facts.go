@@ -98,6 +98,11 @@ type Param struct {
 	Name string `json:"name"`
 	In   string `json:"in"` // path or query
 	Pos  string `json:"pos"`
+	// What the handler's code enforces, where it is certain; see paramConstraints.
+	Default *Constraint     `json:"default,omitempty"`
+	Minimum *Constraint     `json:"minimum,omitempty"`
+	Maximum *Constraint     `json:"maximum,omitempty"`
+	Enum    *EnumConstraint `json:"enum,omitempty"`
 }
 
 // RequestBody is the type a handler decodes the request body into as JSON.

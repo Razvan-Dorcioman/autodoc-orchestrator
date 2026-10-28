@@ -406,7 +406,7 @@ func (x *extractor) reach(f *Facts) {
 }
 
 // analyzeHandler records the handler's inputs (r.PathValue, url.Values.Get,
-// a JSON request body), the module constants it uses, the module functions
+// a JSON request body) with the constraints it enforces on them, the module constants it uses, the module functions
 // it calls and the responses it writes.
 func (x *extractor) analyzeHandler(r *Route, h funcDecl, sites []ResponseSite) {
 	for _, s := range sites {
@@ -454,6 +454,7 @@ func (x *extractor) analyzeHandler(r *Route, h funcDecl, sites []ResponseSite) {
 	})
 	r.ConstsUsed = sortedKeys(consts)
 	r.Calls = sortedKeys(calls)
+	x.paramConstraints(r, h)
 }
 
 func sortedKeys(m map[string]bool) []string {

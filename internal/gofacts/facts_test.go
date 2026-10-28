@@ -69,7 +69,12 @@ func TestExtractRoutes(t *testing.T) {
 	if idx.Method != "GET" || idx.Path != "/" || !idx.ExactMatch || idx.Handler != "api.index" {
 		t.Errorf("index route = %+v", idx)
 	}
-	if want := []Param{{Name: "limit", In: "query", Pos: "internal/api/api.go:54"}}; !reflect.DeepEqual(idx.Params, want) {
+	want := []Param{{
+		Name: "limit", In: "query", Pos: "internal/api/api.go:54",
+		Default: &Constraint{Value: "5", Pos: "internal/api/api.go:53"},
+		Maximum: &Constraint{Value: "20", Pos: "internal/api/api.go:56"},
+	}}
+	if !reflect.DeepEqual(idx.Params, want) {
 		t.Errorf("index params = %+v, want %+v", idx.Params, want)
 	}
 	if want := []string{"api.defaultLimit", "api.maxLimit"}; !reflect.DeepEqual(idx.ConstsUsed, want) {

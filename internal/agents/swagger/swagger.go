@@ -49,7 +49,9 @@ Rules for a handler:
   required (true). Query params are optional (false) when the code falls back to a default.
 - Put the constraints the code enforces in @Param attributes: Enums(A,B,C) for a fixed set of accepted
   values, default(x) for the value used when the parameter is absent, minimum(n) / maximum(n) for numeric
-  bounds the code checks. Use type int for values parsed with strconv.Atoi.
+  bounds the code checks. The route facts list the ones they could read per param (default, minimum,
+  maximum, enum, each with its position); the gate checks those. Use type int for values parsed with
+  strconv.Atoi.
 - When the route facts have a body, the handler decodes the request body as JSON: add one
   @Param body body <body.type> true "<what it carries>" and @Accept json. Without a body, neither.
 - One @Success or @Failure line per status code in the route's responses, and no other codes. Use

@@ -23,7 +23,7 @@ const (
 
 // Issue is one gate finding, phrased so the producing agent can act on it.
 type Issue struct {
-	Check   string `json:"check"` // swag, code, scope, go or spec
+	Check   string `json:"check"` // swag, code, scope, go, spec or constraint
 	Where   string `json:"where,omitempty"`
 	Message string `json:"message"`
 }
@@ -33,6 +33,9 @@ type Report struct {
 	Gate   string        `json:"gate"`
 	Checks []CheckResult `json:"checks"`
 	Issues []Issue       `json:"issues"`
+	// Advisory is set when the issues left do not fail the run: only
+	// constraint issues on gate A's last attempt.
+	Advisory bool `json:"advisory,omitempty"`
 }
 
 // OK reports whether the gate passed.
@@ -79,7 +82,8 @@ func Swag(ctx context.Context, dir, main, out string) CheckResult {
 // GateA generates the spec and checks the working copy: code unchanged, only
 // allowed files changed, no check that was green at the baseline now red,
 // the spec valid and reproducible, and the spec in agreement with
-// facts.json. Every check runs, so one report lists every problem.
+// facts.json, its param defaults, enums and bounds included. Every check
+// runs, so one report lists every problem.
 func GateA(ctx context.Context, in GateAInput) Report {
 	rep := Report{Gate: "A", Issues: []Issue{}}
 	add := func(is ...Issue) { rep.Issues = append(rep.Issues, is...) }
@@ -145,7 +149,8 @@ func checkGenerated(ctx context.Context, in GateAInput, rep *Report) []Issue {
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].Where < out[j].Where })
-	return append(out, checkSpec(jsonData, in.Facts)...)
+	out = append(out, checkSpec(jsonData, in.Facts)...)
+	return append(out, checkConstraints(jsonData, in.Facts)...)
 }
 
 // checkCode proves the code did not change: every .go file outside the
