@@ -84,8 +84,8 @@ func cmdRun(ctx context.Context, args []string) error {
 	res, err := pipeline.Run(ctx, cfg, rec, pipeline.Input{Repo: *repo, Main: *mainFile, RunTests: *runTests})
 	t := rec.Totals()
 	defer fmt.Println(costLine(rec.Summary().Cost))
-	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d\n",
-		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens)
+	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d (%d input cached)\n",
+		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens, t.CachedTokens)
 	defer fmt.Println("status:", rec.Summary().Status, "summary:", filepath.Join(rec.Dir(), "summary.json"))
 	if res.Commit != "" {
 		// A failed push leaves the commit on the local branch.
@@ -138,8 +138,8 @@ func cmdSmoke(ctx context.Context, args []string) error {
 	}
 	t := rec.Totals()
 	fmt.Printf("answer: %s\n", answer)
-	fmt.Printf("model calls: %d, tool calls: %d, tokens in/out/total: %d/%d/%d\n",
-		t.ModelCalls, t.ToolCalls, t.InputTokens, t.OutputTokens, t.TotalTokens)
+	fmt.Printf("model calls: %d, tool calls: %d, tokens in/out/total: %d/%d/%d (%d input cached)\n",
+		t.ModelCalls, t.ToolCalls, t.InputTokens, t.OutputTokens, t.TotalTokens, t.CachedTokens)
 	fmt.Println(costLine(rec.Summary().Cost))
 	fmt.Println("trace:", rec.Dir())
 	return nil

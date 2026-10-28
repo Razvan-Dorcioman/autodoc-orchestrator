@@ -113,16 +113,17 @@ func TestLoadPricing(t *testing.T) {
 		t.Errorf("default pricing = %+v", cfg.Pricing)
 	}
 
-	t.Setenv("AUTODOC_PRICES", "a=0.3/2.5, b = 1/4,")
+	t.Setenv("AUTODOC_PRICES", "a=0.3/0.03/2.5, b = 1/4,")
 	t.Setenv("AUTODOC_REFERENCE_PRICE", "big=3/15")
 	if cfg, err = Load(); err != nil {
 		t.Fatal(err)
 	}
 	p := cfg.Pricing
-	if len(p.Models) != 2 || p.Models["a"] != (trace.Price{InputPerM: 0.3, OutputPerM: 2.5}) || p.Models["b"] != (trace.Price{InputPerM: 1, OutputPerM: 4}) {
+	if len(p.Models) != 2 || p.Models["a"] != (trace.Price{InputPerM: 0.3, CachedInputPerM: 0.03, OutputPerM: 2.5}) ||
+		p.Models["b"] != (trace.Price{InputPerM: 1, CachedInputPerM: 1, OutputPerM: 4}) {
 		t.Errorf("models = %+v", p.Models)
 	}
-	if p.ReferenceName != "big" || p.Reference != (trace.Price{InputPerM: 3, OutputPerM: 15}) {
+	if p.ReferenceName != "big" || p.Reference != (trace.Price{InputPerM: 3, CachedInputPerM: 3, OutputPerM: 15}) {
 		t.Errorf("reference = %s %+v", p.ReferenceName, p.Reference)
 	}
 }

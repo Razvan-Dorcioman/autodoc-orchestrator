@@ -30,6 +30,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 - **Swagger agent:** one turn per handler with only its facts, types, constants and source. Small context → fewer invented params.
 - **Docs agent:** one session per page, so prompts fit a 16k local context and gate B's issues return to the session that wrote it. It gets the brief, the facts it must mention and a capped slice of `facts.json`; claims cite `file:symbol`.
 - **Judge:** one claim + its cited snippet per call, fresh session. Claims are split deterministically by citation; `// @` lines are removed from snippets (LLM-written, not evidence).
+- **Prompt caching:** each agent's system prompt and tools are constant and come first, so provider prefix caches (Gemini implicit caching, the local server's KV cache) reuse them and the growing session history; a test fails if anything per run gets in.
 
 ## Verification
 
@@ -47,7 +48,7 @@ Model-judged: the judge rates each claim *supported / unsupported / unverifiable
 
 Everything generated is regenerated each run, so an unchanged service gives a near-empty diff, and a code change alters `facts.json`, failing the gates until annotations and docs catch up.
 
-`trace.jsonl` logs every step, agent turn, tool call, model call (model used, tokens, latency, estimated cost), retry, fallback and gate result; `summary.json` has the status, per-step and per-model totals (cost at `AUTODOC_PRICES`, plus at a reference paid price, since the defaults are free) and the result.
+`trace.jsonl` logs every step, agent turn, tool call, model call (model used, tokens incl. prompt-cache hits, latency, estimated cost), retry, fallback and gate result; `summary.json` has the status, per-step and per-model totals (cost at `AUTODOC_PRICES`, plus at a reference paid price, since the defaults are free) and the result.
 
 ## Known limitations
 

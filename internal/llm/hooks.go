@@ -161,6 +161,8 @@ func (h *Hooks) afterModel(ctx agent.Context, resp *model.LLMResponse, respErr e
 		}
 		if u := resp.UsageMetadata; u != nil {
 			e.InputTokens = int(u.PromptTokenCount + u.ToolUsePromptTokenCount)
+			// Gemini and OpenAI-compatible servers count cache hits within the prompt tokens.
+			e.CachedTokens = int(u.CachedContentTokenCount)
 			e.OutputTokens = int(u.CandidatesTokenCount)
 			e.ThoughtTokens = int(u.ThoughtsTokenCount)
 			e.TotalTokens = int(u.TotalTokenCount)

@@ -8,30 +8,41 @@ import (
 	"strings"
 )
 
-// Price is what a model costs, in USD per million tokens.
+// Price is what a model costs, in USD per million tokens. CachedInputPerM is
+// the rate for input tokens the provider served from its prompt cache.
 type Price struct {
-	InputPerM  float64 `json:"input_per_m"`
-	OutputPerM float64 `json:"output_per_m"`
+	InputPerM       float64 `json:"input_per_m"`
+	CachedInputPerM float64 `json:"cached_input_per_m"`
+	OutputPerM      float64 `json:"output_per_m"`
 }
 
 func (p Price) String() string {
-	return fmt.Sprintf("$%g/$%g per 1M in/out", p.InputPerM, p.OutputPerM)
+	if p.CachedInputPerM == p.InputPerM {
+		return fmt.Sprintf("$%g/$%g per 1M in/out", p.InputPerM, p.OutputPerM)
+	}
+	return fmt.Sprintf("$%g/$%g/$%g per 1M in/cached/out", p.InputPerM, p.CachedInputPerM, p.OutputPerM)
 }
 
-// ParsePrice reads "in/out", USD per million input and output tokens, such as "1.25/10".
+// ParsePrice reads "in/out" or "in/cached/out", USD per million input, cached
+// input and output tokens, such as "1.25/10" or "1.25/0.125/10". Without a
+// cached rate, cached input costs as much as any other input.
 func ParsePrice(s string) (Price, error) {
-	in, out, ok := strings.Cut(strings.TrimSpace(s), "/")
-	if !ok {
-		return Price{}, fmt.Errorf("price %q is not in/out USD per 1M tokens, such as 1.25/10", s)
+	parts := strings.Split(strings.TrimSpace(s), "/")
+	if len(parts) != 2 && len(parts) != 3 {
+		return Price{}, fmt.Errorf("price %q is not in/out or in/cached/out USD per 1M tokens, such as 1.25/10 or 1.25/0.125/10", s)
 	}
-	var p Price
-	var err1, err2 error
-	p.InputPerM, err1 = strconv.ParseFloat(strings.TrimSpace(in), 64)
-	p.OutputPerM, err2 = strconv.ParseFloat(strings.TrimSpace(out), 64)
-	if err1 != nil || err2 != nil || p.InputPerM < 0 || p.OutputPerM < 0 {
-		return Price{}, fmt.Errorf("price %q is not in/out USD per 1M tokens, such as 1.25/10", s)
+	v := make([]float64, len(parts))
+	for i, part := range parts {
+		f, err := strconv.ParseFloat(strings.TrimSpace(part), 64)
+		if err != nil || f < 0 {
+			return Price{}, fmt.Errorf("price %q is not in/out or in/cached/out USD per 1M tokens, such as 1.25/10 or 1.25/0.125/10", s)
+		}
+		v[i] = f
 	}
-	return p, nil
+	if len(v) == 2 {
+		return Price{InputPerM: v[0], CachedInputPerM: v[0], OutputPerM: v[1]}, nil
+	}
+	return Price{InputPerM: v[0], CachedInputPerM: v[1], OutputPerM: v[2]}, nil
 }
 
 // Pricing estimates what model calls cost. A model missing from Models is
@@ -45,21 +56,23 @@ type Pricing struct {
 }
 
 // DefaultPricing has no paid models, since the default chains are free, and
-// uses Gemini 2.5 Pro's paid list price (prompts up to 200k tokens) as the
-// reference.
+// uses Gemini 2.5 Pro's paid list price (prompts up to 200k tokens; cache hits
+// at a 90% discount) as the reference.
 func DefaultPricing() Pricing {
-	return Pricing{ReferenceName: "gemini-2.5-pro", Reference: Price{InputPerM: 1.25, OutputPerM: 10}}
+	return Pricing{ReferenceName: "gemini-2.5-pro", Reference: Price{InputPerM: 1.25, CachedInputPerM: 0.125, OutputPerM: 10}}
 }
 
 // costNote goes into summary.json and run_end so nobody reads the figure as a bill.
 const costNote = "estimate: recorded token counts times the configured price table (AUTODOC_PRICES); " +
-	"models not in it are counted as free; thought tokens are priced as output; not a bill"
+	"models not in it are counted as free; cached input is priced at the cached rate; thought tokens are priced as output; not a bill"
 
-// cost returns the estimated and reference cost of one call. Thought tokens
-// are billed as output by the APIs that report them.
-func (p Pricing) cost(model string, in, out int) (est, ref float64) {
+// cost returns the estimated and reference cost of one call. cached is the
+// part of in that came from the provider's prompt cache. Thought tokens are
+// billed as output by the APIs that report them.
+func (p Pricing) cost(model string, in, cached, out int) (est, ref float64) {
+	cached = min(max(cached, 0), in)
 	price := func(pr Price) float64 {
-		return (float64(in)*pr.InputPerM + float64(out)*pr.OutputPerM) / 1e6
+		return (float64(in-cached)*pr.InputPerM + float64(cached)*pr.CachedInputPerM + float64(out)*pr.OutputPerM) / 1e6
 	}
 	if pr, ok := p.Models[model]; ok {
 		est = price(pr)

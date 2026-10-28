@@ -11,10 +11,14 @@ import (
 
 func TestParsePrice(t *testing.T) {
 	p, err := ParsePrice(" 1.25 / 10 ")
-	if err != nil || p != (Price{InputPerM: 1.25, OutputPerM: 10}) {
+	if err != nil || p != (Price{InputPerM: 1.25, CachedInputPerM: 1.25, OutputPerM: 10}) {
 		t.Errorf("ParsePrice = %+v, %v", p, err)
 	}
-	for _, bad := range []string{"", "1.25", "a/b", "1/-2", "1/2/3"} {
+	p, err = ParsePrice("1.25/0.125/10")
+	if err != nil || p != (Price{InputPerM: 1.25, CachedInputPerM: 0.125, OutputPerM: 10}) {
+		t.Errorf("ParsePrice with a cached rate = %+v, %v", p, err)
+	}
+	for _, bad := range []string{"", "1.25", "a/b", "1/-2", "1/-1/2", "1/2/3/4"} {
 		if _, err := ParsePrice(bad); err == nil {
 			t.Errorf("ParsePrice(%q) accepted", bad)
 		}
@@ -97,6 +101,37 @@ func TestCostPerCallAndRun(t *testing.T) {
 	}
 }
 
+// TestCachedInputIsPricedAtTheCachedRate: cache hits are part of the input
+// tokens and cost the cached rate; the trace and summary count them per call,
+// step and model.
+func TestCachedInputIsPricedAtTheCachedRate(t *testing.T) {
+	rec, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	rec.SetPricing(Pricing{
+		Models:        map[string]Price{"paid": {InputPerM: 2, CachedInputPerM: 0.5, OutputPerM: 8}},
+		ReferenceName: "ref", Reference: Price{InputPerM: 1, CachedInputPerM: 1, OutputPerM: 10},
+	})
+	rec.Emit(Event{Type: StepStart, Step: "docs"})
+	// paid: 0.25M uncached at $2 + 0.75M cached at $0.5 = $0.875; reference
+	// has no discount: 1M at $1.
+	rec.Emit(Event{Type: ModelCall, Model: "paid", InputTokens: 1_000_000, CachedTokens: 750_000})
+	// More cached than input is a provider's miscount: priced as all cached.
+	rec.Emit(Event{Type: ModelCall, Model: "paid", InputTokens: 1_000_000, CachedTokens: 2_000_000})
+	rec.Emit(Event{Type: StepEnd, Step: "docs"})
+
+	s := rec.Summary()
+	if s.Cost.USD != 1.375 || s.Cost.ReferenceUSD != 2 {
+		t.Errorf("cost = $%g, reference $%g; want $1.375 and $2", s.Cost.USD, s.Cost.ReferenceUSD)
+	}
+	if s.CachedTokens != 2_750_000 || s.Models["paid"].CachedTokens != 2_750_000 || s.Steps[0].CachedTokens != 2_750_000 {
+		t.Errorf("cached tokens: run %d, model %d, step %d; want 2750000 each",
+			s.CachedTokens, s.Models["paid"].CachedTokens, s.Steps[0].CachedTokens)
+	}
+}
+
 func TestDefaultPricingCountsEverythingFree(t *testing.T) {
 	rec, err := New(t.TempDir())
 	if err != nil {
@@ -104,9 +139,11 @@ func TestDefaultPricingCountsEverythingFree(t *testing.T) {
 	}
 	defer rec.Close()
 	rec.Emit(Event{Type: ModelCall, Model: "qwen3:14b", InputTokens: 200_000, OutputTokens: 20_000})
+	rec.Emit(Event{Type: ModelCall, Model: "qwen3:14b", InputTokens: 100_000, CachedTokens: 100_000})
 	c := rec.Summary().Cost
-	// Reference gemini-2.5-pro: 0.2M at $1.25 + 0.02M at $10 = $0.45.
-	if c.USD != 0 || c.ReferenceUSD != 0.45 || c.ReferenceModel != "gemini-2.5-pro" {
+	// Reference gemini-2.5-pro: 0.2M at $1.25 + 0.02M at $10 = $0.45, plus
+	// 0.1M cached at $0.125 = $0.0125.
+	if c.USD != 0 || c.ReferenceUSD != 0.4625 || c.ReferenceModel != "gemini-2.5-pro" {
 		t.Errorf("cost = %+v", c)
 	}
 }

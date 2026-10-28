@@ -107,17 +107,17 @@ func Load() (Config, error) {
 	return cfg, nil
 }
 
-// loadPricing reads AUTODOC_PRICES, comma-separated model=in/out entries in
-// USD per 1M tokens (e.g. "gemini-2.5-flash=0.30/2.50"), and
-// AUTODOC_REFERENCE_PRICE, one name=in/out entry that replaces the default
-// reference.
+// loadPricing reads AUTODOC_PRICES, comma-separated model=in/out or
+// model=in/cached/out entries in USD per 1M tokens (e.g.
+// "gemini-2.5-flash=0.30/0.03/2.50"), and AUTODOC_REFERENCE_PRICE, one entry
+// of the same form that replaces the default reference.
 func loadPricing() (trace.Pricing, error) {
 	p := trace.DefaultPricing()
 	parse := func(key, entry string) (string, trace.Price, error) {
 		name, price, ok := strings.Cut(entry, "=")
 		name = strings.TrimSpace(name)
 		if !ok || name == "" {
-			return "", trace.Price{}, fmt.Errorf("%s: %q is not model=in/out, such as gemini-2.5-flash=0.30/2.50", key, entry)
+			return "", trace.Price{}, fmt.Errorf("%s: %q is not model=in/out or model=in/cached/out, such as gemini-2.5-flash=0.30/0.03/2.50", key, entry)
 		}
 		pr, err := trace.ParsePrice(price)
 		if err != nil {

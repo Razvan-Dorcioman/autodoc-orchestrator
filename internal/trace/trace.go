@@ -42,6 +42,7 @@ type Event struct {
 	// Model calls.
 	Model         string `json:"model,omitempty"`
 	InputTokens   int    `json:"input_tokens,omitempty"`
+	CachedTokens  int    `json:"cached_tokens,omitempty"` // input tokens the provider served from its prompt cache; part of InputTokens
 	OutputTokens  int    `json:"output_tokens,omitempty"`
 	ThoughtTokens int    `json:"thought_tokens,omitempty"`
 	TotalTokens   int    `json:"total_tokens,omitempty"`
@@ -86,16 +87,18 @@ type Summary struct {
 // StepSummary is one step of the pipeline. Model calls count toward the step
 // that was running, so the judge's calls are the docs step's.
 type StepSummary struct {
-	Name        string `json:"name"`
-	DurationMS  int64  `json:"duration_ms"`
-	Error       string `json:"error,omitempty"`
-	ModelCalls  int    `json:"model_calls"`
-	TotalTokens int    `json:"total_tokens"`
+	Name         string `json:"name"`
+	DurationMS   int64  `json:"duration_ms"`
+	Error        string `json:"error,omitempty"`
+	ModelCalls   int    `json:"model_calls"`
+	TotalTokens  int    `json:"total_tokens"`
+	CachedTokens int    `json:"cached_tokens"`
 }
 
 type ModelTotals struct {
 	Calls        int     `json:"calls"`
 	InputTokens  int     `json:"input_tokens"`
+	CachedTokens int     `json:"cached_tokens"`
 	OutputTokens int     `json:"output_tokens"`
 	TotalTokens  int     `json:"total_tokens"`
 	EstCostUSD   float64 `json:"est_cost_usd"`
@@ -111,6 +114,7 @@ type Totals struct {
 	Retries       int    `json:"retries"`
 	Fallbacks     int    `json:"fallbacks"`
 	InputTokens   int    `json:"input_tokens"`
+	CachedTokens  int    `json:"cached_tokens"`
 	OutputTokens  int    `json:"output_tokens"`
 	ThoughtTokens int    `json:"thought_tokens"`
 	TotalTokens   int    `json:"total_tokens"`
@@ -179,7 +183,7 @@ func (r *Recorder) Emit(e Event) {
 		e.Time = time.Now().UTC()
 	}
 	if e.Type == ModelCall {
-		est, ref := r.pricing.cost(e.Model, e.InputTokens, e.OutputTokens+e.ThoughtTokens)
+		est, ref := r.pricing.cost(e.Model, e.InputTokens, e.CachedTokens, e.OutputTokens+e.ThoughtTokens)
 		e.EstCostUSD, e.RefCostUSD = ptr(usd(est)), ptr(usd(ref))
 		r.estUSD += est
 		r.refUSD += ref
@@ -201,18 +205,21 @@ func (r *Recorder) count(e Event) {
 	case ModelCall:
 		t.ModelCalls++
 		t.InputTokens += e.InputTokens
+		t.CachedTokens += e.CachedTokens
 		t.OutputTokens += e.OutputTokens
 		t.ThoughtTokens += e.ThoughtTokens
 		t.TotalTokens += e.TotalTokens
 		m := r.models[e.Model]
 		m.Calls++
 		m.InputTokens += e.InputTokens
+		m.CachedTokens += e.CachedTokens
 		m.OutputTokens += e.OutputTokens
 		m.TotalTokens += e.TotalTokens
 		r.models[e.Model] = m
 		if r.open >= 0 {
 			r.steps[r.open].ModelCalls++
 			r.steps[r.open].TotalTokens += e.TotalTokens
+			r.steps[r.open].CachedTokens += e.CachedTokens
 		}
 	case StepStart:
 		r.steps = append(r.steps, StepSummary{Name: e.Step})
