@@ -5,6 +5,8 @@ import (
 	"iter"
 	"os"
 	"path/filepath"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -63,7 +65,7 @@ func (f *fakeJudge) GenerateContent(_ context.Context, req *model.LLMRequest, _ 
 		var claim string
 		for _, c := range req.Contents {
 			for _, p := range c.Parts {
-				if strings.HasPrefix(p.Text, "Claim (") {
+				if strings.Contains(p.Text, "Claim (") {
 					claim = p.Text
 				}
 			}
@@ -199,9 +201,82 @@ func TestMessage(t *testing.T) {
 		Page: "docs/api.md", Line: 7, Text: "| qty | 1 |", Context: "## GET /orders\n| Name | Default |", Inherited: true,
 		Citations: []verify.Citation{{Ref: "GET /orders", File: "internal/shop/handlers.go", Snippet: "  12  func get() {}"}},
 	})
-	for _, want := range []string{"Claim (docs/api.md, line 7):\n| qty | 1 |", "| Name | Default |", "cites nothing itself", "`GET /orders` (internal/shop/handlers.go):\n```go\n  12  func get() {}\n```"} {
+	code := "Cited code:\n`GET /orders` (internal/shop/handlers.go):\n```go\n  12  func get() {}\n```\n"
+	if !strings.HasPrefix(msg, code) {
+		t.Errorf("message does not start with the cited code:\n%s", msg)
+	}
+	for _, want := range []string{"| Name | Default |", "cites nothing itself", "Claim (docs/api.md, line 7):\n| qty | 1 |\n"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("message lacks %q:\n%s", want, msg)
+		}
+	}
+	if !strings.HasSuffix(msg, "| qty | 1 |\n") {
+		t.Errorf("message does not end with the claim:\n%s", msg)
+	}
+}
+
+const feeGo = `package shop
+
+// Fee is the handling fee in cents, capped at 500.
+func Fee(cents int64) int64 {
+	return min(cents/10, 500)
+}
+`
+
+// TestCheckJudgesSameCodeBackToBack: risk picks the claims that fit the
+// budget, and the claims citing the same code are judged one after the other.
+func TestCheckJudgesSameCodeBackToBack(t *testing.T) {
+	dir := t.TempDir()
+	for _, d := range []string{"docs", "internal/shop"} {
+		if err := os.MkdirAll(filepath.Join(dir, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for name, src := range map[string]string{"price.go": priceGo, "fee.go": feeGo} {
+		if err := os.WriteFile(filepath.Join(dir, "internal/shop", name), []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	facts := &gofacts.Facts{Packages: []gofacts.Package{{Name: "shop", Dir: "internal/shop",
+		Files: []string{"internal/shop/fee.go", "internal/shop/price.go"}}}}
+	writeDocs(t, dir, "# Business rules\n\n"+
+		"- `internal/shop/price.go:Convert` divides by 100 and never rounds.\n"+ // 3: riskiest
+		"- `internal/shop/fee.go:Fee` caps the fee at 500 cents.\n"+ // 4
+		"- `internal/shop/price.go:Convert` returns the result as a float64.\n"+ // 5
+		"- `internal/shop/fee.go:Fee` is part of the package API.\n") // 6: least risky, over the budget
+
+	rec, err := trace.New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rec.Close()
+	fake := &fakeJudge{}
+	fb, err := llm.NewFallback([]model.LLM{fake}, rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	j := &Judge{rec: rec, model: fb, verdicts: map[string]Result{}, budget: 3}
+	rep, err := j.Check(context.Background(), dir, facts)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	lineRe := regexp.MustCompile(`Claim \(docs/business-rules\.md, line (\d+)\)`)
+	var order []string
+	for _, call := range fake.calls {
+		m := lineRe.FindStringSubmatch(call)
+		if m == nil {
+			t.Fatalf("no claim line in the message:\n%s", call)
+		}
+		order = append(order, m[1])
+	}
+	// fee.go sorts before price.go; within a file, riskiest first.
+	if want := []string{"4", "3", "5"}; !slices.Equal(order, want) {
+		t.Errorf("judged lines %v, want %v", order, want)
+	}
+	for _, r := range rep.Results {
+		if skipped := r.Verdict == Skipped; skipped != (r.Line == 6) {
+			t.Errorf("line %d: verdict %s", r.Line, r.Verdict)
 		}
 	}
 }

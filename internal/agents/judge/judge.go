@@ -36,7 +36,7 @@ const Step = "judge"
 
 // MaxClaims is how many claims one pass judges. A warm local 14B model takes
 // about five seconds per claim, up to half a minute, so a pass takes 5 to
-// 30 minutes on a 16 GB GPU; the riskiest claims go first and the rest are
+// 30 minutes on a 16 GB GPU; the riskiest claims are judged and the rest are
 // reported as skipped.
 const MaxClaims = 60
 
@@ -49,9 +49,9 @@ const (
 	Skipped      = "skipped"
 )
 
-const instruction = `You fact-check the documentation of a Go service against its code. Each message holds one claim, a
-line of a docs page, with the code it cites, line-numbered. Judge only that line: the context around it is
-there to make it readable and is not under review.
+const instruction = `You fact-check the documentation of a Go service against its code. Each message holds the code one
+claim cites, line-numbered, then the claim: a line of a docs page. Judge only that line: the context around it
+is there to make it readable and is not under review.
 
 Verdicts:
 - supported: the code shows the line is true. Paraphrase, summary and leaving out detail are fine; a table row
@@ -159,7 +159,8 @@ func New(ctx context.Context, cfg config.Config, rec *trace.Recorder) (*Judge, e
 }
 
 // Check splits the pages under dir into claims and judges at most MaxClaims
-// of them that were not judged before, riskiest first.
+// of them that were not judged before: the riskiest, grouped by the code
+// they cite.
 func (j *Judge) Check(ctx context.Context, dir string, facts *gofacts.Facts) (Report, error) {
 	start := time.Now()
 	rep := Report{Budget: j.budget, Verdicts: map[string]int{}, Uncited: map[string][]int{}}
@@ -180,26 +181,54 @@ func (j *Judge) Check(ctx context.Context, dir string, facts *gofacts.Facts) (Re
 	}
 	rep.Claims = len(claims)
 	rep.Results = make([]Result, len(claims))
+	set := func(i int, res Result) {
+		rep.Results[i] = res
+		rep.Verdicts[res.Verdict]++
+	}
+
+	// Risk decides which claims are judged: the riskiest that fit the budget.
+	queued := map[string]bool{}
+	var todo []int
 	for _, i := range Rank(claims) {
 		c := claims[i]
 		key := cacheKey(c)
-		res, ok := j.verdicts[key]
-		switch {
+		switch res, ok := j.verdicts[key]; {
 		case ok:
 			res.Claim, res.Cached = c, true
-		case rep.Judged >= j.budget:
-			res = Result{Claim: c, Verdict: Skipped, Reason: fmt.Sprintf("over the budget of %d claims per pass", j.budget)}
+			set(i, res)
+		case !queued[key] && len(queued) >= j.budget:
+			set(i, Result{Claim: c, Verdict: Skipped, Reason: fmt.Sprintf("over the budget of %d claims per pass", j.budget)})
 		default:
-			rep.Judged++
-			verdict, reason, err := j.judge(ctx, r, c)
-			if err != nil {
-				return rep, fmt.Errorf("judge %s:%d: %w", c.Page, c.Line, err)
-			}
-			res = Result{Claim: c, Verdict: verdict, Reason: reason}
-			j.verdicts[key] = res
+			queued[key] = true
+			todo = append(todo, i)
 		}
-		rep.Results[i] = res
-		rep.Verdicts[res.Verdict]++
+	}
+
+	// The cited code decides the order they are judged in. A message starts
+	// with the cited code, so claims citing the same code go back to back and
+	// each call after the first shares the start of its request with the one
+	// before, which the provider can serve from its prompt cache.
+	code := make(map[int]string, len(todo))
+	for _, i := range todo {
+		code[i] = citedCode(claims[i])
+	}
+	slices.SortStableFunc(todo, func(a, b int) int { return strings.Compare(code[a], code[b]) })
+	for _, i := range todo {
+		c := claims[i]
+		key := cacheKey(c)
+		if res, ok := j.verdicts[key]; ok { // the same line and code twice in one pass
+			res.Claim, res.Cached = c, true
+			set(i, res)
+			continue
+		}
+		rep.Judged++
+		verdict, reason, err := j.judge(ctx, r, c)
+		if err != nil {
+			return rep, fmt.Errorf("judge %s:%d: %w", c.Page, c.Line, err)
+		}
+		res := Result{Claim: c, Verdict: verdict, Reason: reason}
+		j.verdicts[key] = res
+		set(i, res)
 	}
 	rep.DurationMS = time.Since(start).Milliseconds()
 	return rep, nil
@@ -276,17 +305,26 @@ func (j *Judge) turn(ctx context.Context, r *runner.Runner, id string, c verify.
 	return answer, nil
 }
 
-// Message is the request for one claim: the line, where it sits on the
-// page, and the code it cites.
+// Message is the request for one claim: the code it cites, where it sits on
+// the page, and the line. The code comes first so that claims citing the
+// same code share the start of their requests (see Check).
 func Message(c verify.Claim) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "Claim (%s, line %d):\n%s\n\n", c.Page, c.Line, c.Text)
+	b.WriteString(citedCode(c))
+	b.WriteString("\n")
+	if c.Inherited {
+		b.WriteString("The line cites nothing itself; the code above is cited by the list item or section it belongs to.\n\n")
+	}
 	if c.Context != "" {
 		fmt.Fprintf(&b, "Where it sits on the page (not under review):\n%s\n\n", c.Context)
 	}
-	if c.Inherited {
-		b.WriteString("The line cites nothing itself; this is the code cited by the list item or section it belongs to.\n")
-	}
+	fmt.Fprintf(&b, "Claim (%s, line %d):\n%s\n", c.Page, c.Line, c.Text)
+	return b.String()
+}
+
+// citedCode is the start of a claim's message: the code it cites.
+func citedCode(c verify.Claim) string {
+	var b strings.Builder
 	b.WriteString("Cited code:\n")
 	for _, ct := range c.Citations {
 		lang := "go"
