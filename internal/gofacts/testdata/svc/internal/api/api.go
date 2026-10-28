@@ -43,6 +43,8 @@ func NewRouter() http.Handler {
 	mux.HandleFunc("GET /{$}", index)
 	mux.HandleFunc("GET /items/{id}", item)
 	mux.Handle("POST /files/{path...}", http.NotFoundHandler())
+	mux.HandleFunc("/orders", orders)
+	mux.HandleFunc("/notes", notes)
 	return recoverer(mux)
 }
 

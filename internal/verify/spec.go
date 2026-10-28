@@ -32,16 +32,64 @@ type spec struct {
 
 type operation struct {
 	Parameters []struct {
-		Name     string `json:"name"`
-		In       string `json:"in"`
-		Required bool   `json:"required"`
+		Name     string  `json:"name"`
+		In       string  `json:"in"`
+		Required bool    `json:"required"`
+		Schema   *schema `json:"schema"`
 	} `json:"parameters"`
 	Responses map[string]struct {
-		Description string `json:"description"`
-		Schema      *struct {
-			Ref string `json:"$ref"`
-		} `json:"schema"`
+		Description string  `json:"description"`
+		Schema      *schema `json:"schema"`
 	} `json:"responses"`
+}
+
+type schema struct {
+	Ref   string  `json:"$ref"`
+	Type  string  `json:"type"`
+	Items *schema `json:"items"`
+}
+
+// schemaMismatch says how s fails to describe the Go type typ ("pkg.T",
+// "[]pkg.T", "*pkg.T"), or "" if it does or typ is one the spec has no
+// definition for, such as a map or a basic type.
+func schemaMismatch(s *schema, typ string) string {
+	typ = strings.TrimPrefix(typ, "*")
+	if elem, ok := strings.CutPrefix(typ, "[]"); ok {
+		switch {
+		case s == nil || s.Type != "array":
+			return "is not an array"
+		case schemaMismatch(s.Items, elem) != "":
+			return "has items that are not " + elem
+		}
+		return ""
+	}
+	if !definable(typ) {
+		return ""
+	}
+	switch {
+	case s == nil:
+		return "has no schema"
+	case s.Ref != defsPrefix+typ:
+		return "is " + describe(s)
+	}
+	return ""
+}
+
+// definable reports whether typ is a named "pkg.T", which swag turns into a
+// definition.
+func definable(typ string) bool {
+	pkg, name, ok := strings.Cut(typ, ".")
+	return ok && pkg != "" && name != "" && !strings.ContainsAny(typ, "[]*{} ")
+}
+
+func describe(s *schema) string {
+	switch {
+	case s.Ref != "":
+		return strings.TrimPrefix(s.Ref, defsPrefix)
+	case s.Type != "":
+		return "type " + s.Type
+	}
+	return "an empty schema"
 }
 
 var httpMethods = map[string]bool{"get": true, "put": true, "post": true, "delete": true, "options": true, "head": true, "patch": true}
@@ -142,67 +190,44 @@ func checkSpec(jsonData []byte, f *gofacts.Facts) []Issue {
 		}
 	}
 
+	// A route documents one operation per method. One whose handler ignores
+	// the method takes every operation on its path that no other route
+	// claims, and needs at least one.
+	claimed := map[string]bool{}
+	for _, r := range f.Routes {
+		for _, m := range r.OpMethods() {
+			claimed[strings.ToLower(m)+" "+r.Path] = true
+		}
+	}
 	seen := map[string]bool{}
 	for _, r := range f.Routes {
-		key := strings.ToLower(r.Method) + " " + r.Path
 		where := fmt.Sprintf("%s (handler %s at %s)", r.Pattern, r.Handler, r.HandlerPos)
-		op, ok := ops[key]
-		if !ok {
-			add(where, "route is not in the spec: annotate the handler with @Router %s [%s]", r.Path, strings.ToLower(r.Method))
-			continue
-		}
-		seen[key] = true
-
-		want := map[string]bool{}
-		for _, p := range r.Params {
-			want[p.In+" "+p.Name] = true
-		}
-		got := map[string]bool{}
-		for _, p := range op.Parameters {
-			k := p.In + " " + p.Name
-			got[k] = true
-			switch {
-			case !want[k]:
-				add(where, "@Param %s (in %s) is not read by the handler; remove it", p.Name, p.In)
-			case p.In == "path" && !p.Required:
-				add(where, "path param %s must be required (true)", p.Name)
+		methods := r.OpMethods()
+		if len(methods) == 0 {
+			for _, key := range sortedKeys(ops) {
+				m, p, _ := strings.Cut(key, " ")
+				if p == r.Path && !claimed[key] {
+					methods = append(methods, strings.ToUpper(m))
+				}
 			}
-		}
-		for _, p := range r.Params {
-			if !got[p.In+" "+p.Name] {
-				add(where, "missing @Param %s %s: the handler reads it at %s", p.Name, p.In, p.Pos)
-			}
-		}
-
-		byStatus := map[string][]gofacts.ResponseSite{}
-		for _, site := range r.Responses {
-			k := strconv.Itoa(site.Status)
-			byStatus[k] = append(byStatus[k], site)
-		}
-		for code := range op.Responses {
-			if _, ok := byStatus[code]; !ok {
-				add(where, "response %s is documented but the handler never writes it; remove it", code)
-			}
-		}
-		for _, code := range sortedKeys(byStatus) {
-			sites := byStatus[code]
-			resp, ok := op.Responses[code]
-			if !ok {
-				add(where, "status %s is not documented: the handler writes it at %s", code, positions(sites))
+			if len(methods) == 0 {
+				add(where, "route is not in the spec: the handler does not check r.Method, so ServeMux sends it every method; "+
+					"annotate the handler with one @Router %s [method] line per method a client is meant to use", r.Path)
 				continue
 			}
-			if body := sameBody(sites); body != "" {
-				switch {
-				case resp.Schema == nil:
-					add(where, "response %s has no schema; the handler writes {object} %s", code, body)
-				case resp.Schema.Ref != defsPrefix+body:
-					add(where, "response %s schema is %s; the handler writes {object} %s", code, strings.TrimPrefix(resp.Schema.Ref, defsPrefix), body)
-				}
+		}
+		for _, m := range methods {
+			key := strings.ToLower(m) + " " + r.Path
+			op, ok := ops[key]
+			if !ok {
+				add(where, "route is not in the spec: annotate the handler with @Router %s [%s]", r.Path, strings.ToLower(m))
+				continue
 			}
-			for _, site := range sites {
-				if site.Code != "" && !strings.Contains(resp.Description, site.Code) {
-					add(where, "response %s description must name error code %q (written at %s)", code, site.Code, site.Pos)
-				}
+			seen[key] = true
+			if len(methods) > 1 {
+				out = append(out, checkOperation(where+" "+m, r, op)...)
+			} else {
+				out = append(out, checkOperation(where, r, op)...)
 			}
 		}
 	}
@@ -234,6 +259,91 @@ func checkSpec(jsonData []byte, f *gofacts.Facts) []Issue {
 		for _, fld := range sortedKeys(got) {
 			if !want[fld] {
 				add("definition "+name, "property %q is not a JSON field of %s (%s)", fld, name, t.Pos)
+			}
+		}
+	}
+	return out
+}
+
+// checkOperation compares one operation of the spec with its route: the
+// params, the request body, the statuses with their bodies and error codes.
+func checkOperation(where string, r gofacts.Route, op operation) []Issue {
+	var out []Issue
+	add := func(format string, args ...any) {
+		out = append(out, Issue{Check: "spec", Where: where, Message: fmt.Sprintf(format, args...)})
+	}
+
+	want := map[string]bool{}
+	for _, p := range r.Params {
+		want[p.In+" "+p.Name] = true
+	}
+	got := map[string]bool{}
+	bodies := 0
+	for _, p := range op.Parameters {
+		if p.In == "body" {
+			bodies++
+			switch {
+			case r.Body == nil:
+				add("@Param %s (in body) is not read by the handler: it decodes no request body; remove it", p.Name)
+			case !p.Required:
+				add("body param %s must be required (true)", p.Name)
+			default:
+				if msg := schemaMismatch(p.Schema, r.Body.Type); msg != "" {
+					add("body param %s %s; the handler decodes %s at %s", p.Name, msg, r.Body.Type, r.Body.Pos)
+				}
+			}
+			continue
+		}
+		k := p.In + " " + p.Name
+		got[k] = true
+		switch {
+		case !want[k]:
+			add("@Param %s (in %s) is not read by the handler; remove it", p.Name, p.In)
+		case p.In == "path" && !p.Required:
+			add("path param %s must be required (true)", p.Name)
+		}
+	}
+	for _, p := range r.Params {
+		if !got[p.In+" "+p.Name] {
+			add("missing @Param %s %s: the handler reads it at %s", p.Name, p.In, p.Pos)
+		}
+	}
+	switch {
+	case r.Body != nil && bodies == 0:
+		add("missing @Param body body %s true: the handler decodes the request body at %s", r.Body.Type, r.Body.Pos)
+	case bodies > 1:
+		add("%d body params; an operation has one request body", bodies)
+	}
+
+	byStatus := map[string][]gofacts.ResponseSite{}
+	for _, site := range r.Responses {
+		k := strconv.Itoa(site.Status)
+		byStatus[k] = append(byStatus[k], site)
+	}
+	for code := range op.Responses {
+		if _, ok := byStatus[code]; !ok {
+			add("response %s is documented but the handler never writes it; remove it", code)
+		}
+	}
+	for _, code := range sortedKeys(byStatus) {
+		sites := byStatus[code]
+		resp, ok := op.Responses[code]
+		if !ok {
+			add("status %s is not documented: the handler writes it at %s", code, positions(sites))
+			continue
+		}
+		if body := sameBody(sites); body != "" {
+			if msg := schemaMismatch(resp.Schema, body); msg != "" {
+				kind := "{object}"
+				if strings.HasPrefix(body, "[]") {
+					kind, body = "{array}", strings.TrimPrefix(body, "[]")
+				}
+				add("response %s schema %s; the handler writes %s %s", code, msg, kind, body)
+			}
+		}
+		for _, site := range sites {
+			if site.Code != "" && !strings.Contains(resp.Description, site.Code) {
+				add("response %s description must name error code %q (written at %s)", code, site.Code, site.Pos)
 			}
 		}
 	}

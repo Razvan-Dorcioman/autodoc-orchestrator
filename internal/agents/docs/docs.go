@@ -7,12 +7,15 @@
 package docs
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io/fs"
+	"math"
 	"path"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"google.golang.org/adk/v2/agent"
@@ -113,7 +116,11 @@ var pages = map[string]page{
 		facts: func(a *Agent) []section {
 			var routes []map[string]any
 			for _, r := range a.facts.Routes {
-				routes = append(routes, map[string]any{"pattern": r.Pattern, "handler": r.Handler, "handler_pos": r.HandlerPos, "registered": r.Registered, "calls": r.Calls})
+				m := map[string]any{"pattern": r.Pattern, "handler": r.Handler, "handler_pos": r.HandlerPos, "registered": r.Registered, "calls": r.Calls}
+				if r.Dispatcher != "" {
+					m["dispatched_by_method_in"] = r.Dispatcher
+				}
+				routes = append(routes, m)
 			}
 			return []section{
 				{"Routes", routes},
@@ -126,12 +133,15 @@ var pages = map[string]page{
 	"api.md": {
 		title: "API",
 		about: "Every endpoint: method and path, what it does, its path and query parameters with type, default, allowed " +
-			"values and bounds, its status codes with their error codes, and its response fields with type and meaning " +
-			"(say when a field is omitted). Take parameters and statuses from the spec. Add an example request per " +
-			"endpoint. Also document GET /openapi.json, which serves this spec as JSON.",
+			"values and bounds, its request body fields, its status codes with their error codes, and its response " +
+			"fields with type and meaning (say when a field is omitted). Take parameters and statuses from the spec. " +
+			"Add an example request per endpoint. Also document GET /openapi.json, which serves this spec as JSON.",
 		facts: func(a *Agent) []section {
 			var bodies []string
 			for _, r := range a.facts.Routes {
+				if r.Body != nil {
+					bodies = append(bodies, r.Body.Type)
+				}
 				for _, s := range r.Responses {
 					if s.Status < 400 {
 						bodies = append(bodies, s.Body)
@@ -142,7 +152,7 @@ var pages = map[string]page{
 			if spec, err := tools.GetSpec(a.spec, tools.GetSpecArgs{}); err == nil {
 				out = append(out, section{"The verified spec (operations and the definitions they use)", spec})
 			}
-			return append(out, section{"Response types (from the Go source; omitempty fields are left out when empty)", a.facts.Reachable(bodies...)})
+			return append(out, section{"Request and response types (from the Go source; omitempty fields are left out when empty)", a.facts.Reachable(bodies...)})
 		},
 	},
 	"business-rules.md": {
@@ -154,12 +164,13 @@ var pages = map[string]page{
 		facts: func(a *Agent) []section {
 			var routes []map[string]any
 			for _, r := range a.facts.Routes {
-				routes = append(routes, map[string]any{"pattern": r.Pattern, "handler_pos": r.HandlerPos, "params": r.Params, "consts_used": r.ConstsUsed, "calls": r.Calls})
+				routes = append(routes, map[string]any{"pattern": r.Pattern, "handler_pos": r.HandlerPos, "params": r.Params, "body": r.Body, "consts_used": r.ConstsUsed, "calls": r.Calls})
 			}
+			rules := verify.RuleConstants(a.facts)
 			return []section{
 				{"Routes", routes},
-				{"Constants", a.facts.Constants},
-				{"Package-level variables", a.facts.Vars},
+				{"Constants the handlers reach, nearest first", withOmitted(rules, len(a.facts.Constants)-len(rules), "constants")},
+				{"Package-level variables", withOmitted(capped(a.facts.Vars, maxVars), len(a.facts.Vars)-maxVars, "variables")},
 				{"Functions", functionBriefs(a.facts)},
 				{"Tests (their names often state a rule)", a.facts.Tests},
 			}
@@ -440,9 +451,43 @@ func firstSentence(s string) string {
 func routeBriefs(f *gofacts.Facts) []map[string]any {
 	var out []map[string]any
 	for _, r := range f.Routes {
-		out = append(out, map[string]any{"pattern": r.Pattern, "handler": r.Handler, "handler_pos": r.HandlerPos, "params": r.Params})
+		m := map[string]any{"pattern": r.Pattern, "handler": r.Handler, "handler_pos": r.HandlerPos, "params": r.Params}
+		if len(r.Methods) > 0 {
+			m["methods"] = r.Methods
+		}
+		if r.Body != nil {
+			m["body"] = r.Body.Type
+		}
+		out = append(out, m)
 	}
 	return out
+}
+
+// The bounds of the lists a page message carries in full, so a large
+// module still fits a 16k-token prompt; the rest is one get_facts call away.
+const (
+	maxFunctionBriefs = 80
+	maxTypeBriefs     = 60
+	maxVars           = 40
+)
+
+func capped[T any](list []T, n int) []T {
+	if len(list) > n {
+		return list[:n]
+	}
+	return list
+}
+
+// withOmitted returns list, with a note saying how many more exist when
+// some were left out.
+func withOmitted[T any](list []T, omitted int, what string) any {
+	if omitted <= 0 {
+		return list
+	}
+	return map[string]any{
+		"listed":  list,
+		"omitted": fmt.Sprintf("%d more %s, left out to keep this message small; look them up with get_facts if the page needs them", omitted, what),
+	}
 }
 
 func packageBriefs(f *gofacts.Facts, withFiles bool) []map[string]any {
@@ -460,28 +505,66 @@ func packageBriefs(f *gofacts.Facts, withFiles bool) []map[string]any {
 	return out
 }
 
-func functionBriefs(f *gofacts.Facts) []map[string]any {
+// functionBriefs lists the functions the handlers reach, nearest first,
+// then the others in source order, at most maxFunctionBriefs.
+func functionBriefs(f *gofacts.Facts) any {
+	fns := slices.Clone(f.Functions)
+	slices.SortStableFunc(fns, func(a, b gofacts.Function) int { return cmp.Compare(reachOrder(a.Reach), reachOrder(b.Reach)) })
 	var out []map[string]any
-	for _, fn := range f.Functions {
+	for _, fn := range capped(fns, maxFunctionBriefs) {
 		m := map[string]any{"name": fn.Package + "." + fn.Name, "signature": fn.Signature, "pos": fn.Pos}
 		if fn.Doc != "" {
 			m["doc"] = fn.Doc
 		}
 		out = append(out, m)
 	}
-	return out
+	return withOmitted(out, len(fns)-len(out), "functions")
 }
 
-func typeBriefs(f *gofacts.Facts) []map[string]any {
+// reachOrder sorts reached functions (depth 1, 2, …) before unreached ones (0).
+func reachOrder(reach int) int {
+	if reach == 0 {
+		return math.MaxInt
+	}
+	return reach
+}
+
+// typeBriefs lists the types the routes read and write first, then the
+// others in source order, at most maxTypeBriefs.
+func typeBriefs(f *gofacts.Facts) any {
+	var bodies []string
+	for _, r := range f.Routes {
+		if r.Body != nil {
+			bodies = append(bodies, r.Body.Type)
+		}
+		for _, s := range r.Responses {
+			bodies = append(bodies, s.Body)
+		}
+	}
+	used := map[string]bool{}
+	for _, t := range f.Reachable(bodies...) {
+		used[t.Package+"."+t.Name] = true
+	}
+	types := slices.Clone(f.Types)
+	slices.SortStableFunc(types, func(a, b gofacts.Type) int {
+		return cmp.Compare(boolOrder(!used[a.Package+"."+a.Name]), boolOrder(!used[b.Package+"."+b.Name]))
+	})
 	var out []map[string]any
-	for _, t := range f.Types {
+	for _, t := range capped(types, maxTypeBriefs) {
 		m := map[string]any{"name": t.Package + "." + t.Name, "underlying": t.Underlying, "pos": t.Pos}
 		if t.Doc != "" {
 			m["doc"] = t.Doc
 		}
 		out = append(out, m)
 	}
-	return out
+	return withOmitted(out, len(types)-len(out), "types")
+}
+
+func boolOrder(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 // maxFiles bounds the file list in a message; a larger repository is

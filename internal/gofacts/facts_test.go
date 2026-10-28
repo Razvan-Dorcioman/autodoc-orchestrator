@@ -61,15 +61,15 @@ func TestEntrypoint(t *testing.T) {
 
 func TestExtractRoutes(t *testing.T) {
 	f := extractTestSvc(t)
-	if len(f.Routes) != 3 {
-		t.Fatalf("routes = %+v, want 3", f.Routes)
+	if len(f.Routes) != 6 {
+		t.Fatalf("routes = %+v, want 6", f.Routes)
 	}
 
 	idx := f.Routes[0]
 	if idx.Method != "GET" || idx.Path != "/" || !idx.ExactMatch || idx.Handler != "api.index" {
 		t.Errorf("index route = %+v", idx)
 	}
-	if want := []Param{{Name: "limit", In: "query", Pos: "internal/api/api.go:52"}}; !reflect.DeepEqual(idx.Params, want) {
+	if want := []Param{{Name: "limit", In: "query", Pos: "internal/api/api.go:54"}}; !reflect.DeepEqual(idx.Params, want) {
 		t.Errorf("index params = %+v, want %+v", idx.Params, want)
 	}
 	if want := []string{"api.defaultLimit", "api.maxLimit"}; !reflect.DeepEqual(idx.ConstsUsed, want) {
@@ -100,6 +100,74 @@ func TestExtractRoutes(t *testing.T) {
 	files := f.Routes[2]
 	if files.Method != "POST" || files.Path != "/files/{path}" || files.Handler != "http.NotFoundHandler()" || files.HandlerPos != "" {
 		t.Errorf("files route = %+v", files)
+	}
+	if idx.Body != nil || it.Body != nil {
+		t.Errorf("GET routes have bodies: %+v, %+v", idx.Body, it.Body)
+	}
+}
+
+// TestExtractMethodlessRoutes covers registrations without a method: a
+// switch on r.Method that hands each method to a function becomes one route
+// per method; a handler that checks r.Method itself keeps one route with the
+// methods it checks.
+func TestExtractMethodlessRoutes(t *testing.T) {
+	f := extractTestSvc(t)
+	list, create, notes := f.Routes[3], f.Routes[4], f.Routes[5]
+
+	if list.Pattern != "GET /orders" || list.Method != "GET" || list.Handler != "api.listOrders" || list.Dispatcher != "api.orders" ||
+		list.Registered != "internal/api/api.go:46" || list.Body != nil {
+		t.Errorf("GET /orders = %+v", list)
+	}
+	if got := statuses(list.Responses); !reflect.DeepEqual(got, []int{200}) || list.Responses[0].Body != "[]api.Order" {
+		t.Errorf("GET /orders responses = %+v (the dispatcher's 405 belongs to no route)", list.Responses)
+	}
+
+	if create.Pattern != "POST /orders" || create.Handler != "api.createOrder" || create.HandlerPos != "internal/api/orders.go:47" {
+		t.Errorf("POST /orders = %+v", create)
+	}
+	if want := (&RequestBody{Type: "api.CreateOrder", Pos: "internal/api/orders.go:49", Via: "api.decode"}); !reflect.DeepEqual(create.Body, want) {
+		t.Errorf("POST /orders body = %+v, want %+v", create.Body, want)
+	}
+	if got := statuses(create.Responses); !reflect.DeepEqual(got, []int{400, 422, 201}) {
+		t.Errorf("POST /orders statuses = %v", got)
+	}
+	if bad := create.Responses[1]; bad.Code != "invalid_qty" || bad.Body != "api.ErrorResponse" {
+		t.Errorf("POST /orders 422 = %+v: err.Error() is the message, not the body", bad)
+	}
+
+	if notes.Pattern != "/notes" || notes.Method != "" || !reflect.DeepEqual(notes.Methods, []string{"PUT"}) || notes.Handler != "api.notes" {
+		t.Errorf("/notes = %+v", notes)
+	}
+	if !reflect.DeepEqual(notes.OpMethods(), []string{"PUT"}) || !reflect.DeepEqual(list.OpMethods(), []string{"GET"}) {
+		t.Errorf("OpMethods = %v, %v", notes.OpMethods(), list.OpMethods())
+	}
+	if want := (&RequestBody{Type: "api.Note", Pos: "internal/api/orders.go:80"}); !reflect.DeepEqual(notes.Body, want) {
+		t.Errorf("/notes body = %+v, want %+v (json.Unmarshal of the read body)", notes.Body, want)
+	}
+}
+
+func TestExtractReach(t *testing.T) {
+	f := extractTestSvc(t)
+	got := map[string]int{}
+	for _, c := range f.Constants {
+		got[c.Name] = c.Reach
+	}
+	for _, fn := range f.Functions {
+		got[fn.Name] = fn.Reach
+	}
+	for name, want := range map[string]int{
+		"defaultLimit": 1, // used by a handler
+		"Red":          1, // its type is: item converts to Color
+		"maxQty":       2, // used by checkQty, which createOrder calls
+		"orders":       1, // a dispatcher
+		"createOrder":  1, // a method's handler
+		"decode":       2,
+		"NewRouter":    0, // registers the routes but no handler calls it
+		"recoverer":    0,
+	} {
+		if got[name] != want {
+			t.Errorf("reach of %s = %d, want %d", name, got[name], want)
+		}
 	}
 }
 

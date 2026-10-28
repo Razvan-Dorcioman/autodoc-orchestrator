@@ -50,12 +50,18 @@ Rules for a handler:
 - Put the constraints the code enforces in @Param attributes: Enums(A,B,C) for a fixed set of accepted
   values, default(x) for the value used when the parameter is absent, minimum(n) / maximum(n) for numeric
   bounds the code checks. Use type int for values parsed with strconv.Atoi.
+- When the route facts have a body, the handler decodes the request body as JSON: add one
+  @Param body body <body.type> true "<what it carries>" and @Accept json. Without a body, neither.
 - One @Success or @Failure line per status code in the route's responses, and no other codes. Use
-  {object} and the package-qualified body type from the facts, e.g. {object} httpapi.ErrorResponse.
+  {object} and the package-qualified body type from the facts, e.g. {object} httpapi.ErrorResponse, or
+  {array} and the element type for a slice body: []shop.Order is {array} shop.Order.
   When one status has several error codes, write one line and name every error code in its description.
-- Exactly one @Router line: the facts' path and the lowercase method.
-- Response field details come from the types' JSON tags; you cannot add struct tags.
-- Use @Produce json. Do not add @Accept, @Security, @Header, @host or @schemes.
+- @Router lines: the facts' path, one line per method, lowercase. The method is the route's method. When
+  the route has none, ServeMux sends every method to the handler: write one line per entry in methods
+  (the methods the handler checks r.Method for); if methods is empty too, the handler ignores the method,
+  so write one line for each method a client is meant to use, judging by what the handler does.
+- Field details come from the types' JSON tags; you cannot add struct tags.
+- Use @Produce json. Do not add @Security, @Header, @host or @schemes.
 
 Syntax (an unrelated example):
   // @Summary      Get an order
@@ -68,6 +74,11 @@ Syntax (an unrelated example):
   // @Success      200  {object}  shop.OrderResponse
   // @Failure      400  {object}  shop.ErrorResponse  "bad_id or bad_status: the id or status is invalid"
   // @Router       /orders/{id} [get]
+A route with a request body and two methods (only the lines that differ):
+  // @Accept       json
+  // @Param        body  body  shop.OrderUpdate  true  "The fields to change"
+  // @Router       /orders/{id} [put]
+  // @Router       /orders/{id} [patch]
 
 General API info goes on func main only:
   // @title        <service name>
@@ -241,7 +252,7 @@ func (a *Agent) routeMessage(r gofacts.Route) (string, error) {
 	fmt.Fprintf(&b, "Annotate the handler of %s.\n", r.Pattern)
 	fmt.Fprintf(&b, "Call patch_comment with file %q and func %q.\n\n", file, fn)
 	writeJSON(&b, "Route facts (from the type-checked source; responses lists every status the handler writes)", r)
-	writeJSON(&b, "Types it writes", relatedTypes(a.facts, r))
+	writeJSON(&b, "Types it reads and writes", relatedTypes(a.facts, r))
 	if cs := relatedConstants(a.facts, r); len(cs) > 0 {
 		writeJSON(&b, "Constants it uses", cs)
 	}
@@ -270,10 +281,13 @@ func shortName(handler string) string {
 	return handler
 }
 
-// relatedTypes returns the response body types of r and, transitively, the
-// module types their fields use.
+// relatedTypes returns the request and response body types of r and,
+// transitively, the module types their fields use.
 func relatedTypes(f *gofacts.Facts, r gofacts.Route) []gofacts.Type {
 	var bodies []string
+	if r.Body != nil {
+		bodies = append(bodies, r.Body.Type)
+	}
 	for _, s := range r.Responses {
 		bodies = append(bodies, s.Body)
 	}

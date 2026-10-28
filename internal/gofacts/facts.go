@@ -63,24 +63,48 @@ type Main struct {
 	ServesRoutes bool   `json:"serves_routes"` // registers a route or imports, directly or not, a package that does
 }
 
+// Route is one operation the service serves. A registration without a
+// method whose handler switches on r.Method, with one module function per
+// case, becomes one Route per method: Pattern gets the method, Handler is the
+// case's function and Dispatcher the registered handler.
 type Route struct {
 	Pattern    string         `json:"pattern"` // as registered, e.g. "GET /products/{id}"
 	Method     string         `json:"method,omitempty"`
-	Path       string         `json:"path"` // OpenAPI form, e.g. "/products/{id}"
+	Methods    []string       `json:"methods,omitempty"` // no method in the pattern: the ones the handler compares r.Method with
+	Path       string         `json:"path"`              // OpenAPI form, e.g. "/products/{id}"
 	ExactMatch bool           `json:"exact_match,omitempty"`
 	Handler    string         `json:"handler"`
 	HandlerPos string         `json:"handler_pos,omitempty"`
+	Dispatcher string         `json:"dispatcher,omitempty"`
 	Registered string         `json:"registered"`
 	Params     []Param        `json:"params"`
+	Body       *RequestBody   `json:"body,omitempty"`
 	ConstsUsed []string       `json:"consts_used,omitempty"`
 	Calls      []string       `json:"calls,omitempty"` // module functions the handler calls
 	Responses  []ResponseSite `json:"responses"`
+}
+
+// OpMethods are the methods the route is documented under: its own, else
+// the ones its handler checks for. Empty means the handler ignores the
+// method, so ServeMux sends it every one.
+func (r Route) OpMethods() []string {
+	if r.Method != "" {
+		return []string{r.Method}
+	}
+	return r.Methods
 }
 
 type Param struct {
 	Name string `json:"name"`
 	In   string `json:"in"` // path or query
 	Pos  string `json:"pos"`
+}
+
+// RequestBody is the type a handler decodes the request body into as JSON.
+type RequestBody struct {
+	Type string `json:"type"` // package-qualified, e.g. "httpapi.CreateOrder"
+	Pos  string `json:"pos"`
+	Via  string `json:"via,omitempty"` // the module helper that decodes it, if not the handler
 }
 
 type ResponseSite struct {
@@ -108,6 +132,7 @@ type Constant struct {
 	Value   string `json:"value"`
 	Pos     string `json:"pos"`
 	Doc     string `json:"doc,omitempty"`
+	Reach   int    `json:"reach,omitempty"` // call depth from the nearest route handler that uses it (1: the handler); 0: none does
 }
 
 type Var struct {
@@ -143,6 +168,7 @@ type Function struct {
 	Signature string `json:"signature"`
 	Pos       string `json:"pos"`
 	Doc       string `json:"doc,omitempty"`
+	Reach     int    `json:"reach,omitempty"` // call depth from the nearest route handler (1: a handler); 0: no handler calls it
 }
 
 type EnvVar struct {
@@ -213,6 +239,7 @@ func Extract(ctx context.Context, root string) (*Facts, error) {
 	x.collectDecls(f)
 	f.Responses = x.responseSites()
 	f.Routes = x.routes(f.Responses)
+	x.reach(f)
 	f.Mains = x.mains(f.Routes)
 	f.ImplicitResponses = implicitResponses(f.Routes)
 	f.Env = x.env()
@@ -274,7 +301,7 @@ func (f *Facts) Reachable(names ...string) []Type {
 		}
 	}
 	for _, name := range names {
-		visit(name)
+		visit(strings.TrimLeft(name, "*[]")) // a slice body names its element type
 	}
 	return out
 }
@@ -338,11 +365,12 @@ type funcDecl struct {
 }
 
 type extractor struct {
-	root   string
-	module string
-	fset   *token.FileSet
-	pkgs   []*packages.Package
-	decls  map[*types.Func]funcDecl
+	root     string
+	module   string
+	fset     *token.FileSet
+	pkgs     []*packages.Package
+	decls    map[*types.Func]funcDecl
+	handlers []funcDecl // every route handler and dispatcher, for reach
 }
 
 func (x *extractor) indexFuncs() {

@@ -9,6 +9,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -61,12 +62,22 @@ func DocMentions(f *gofacts.Facts) map[string][]Mention {
 
 	var okBodies, errBodies []string
 	for _, r := range f.Routes {
-		// Named as served, "GET /" for a registered "GET /{$}".
-		m := Mention{Kind: "route", Text: strings.TrimSpace(r.Method + " " + r.Path), Source: r.Registered}
-		if m.Text != r.Pattern {
-			m.Alts = []string{r.Pattern}
+		// Named as served, "GET /" for a registered "GET /{$}"; a route
+		// without a method by each method its handler checks, else its path.
+		methods := r.OpMethods()
+		if len(methods) == 0 {
+			methods = []string{""}
 		}
-		add("api.md", m)
+		for _, method := range methods {
+			m := Mention{Kind: "route", Text: strings.TrimSpace(method + " " + r.Path), Source: r.Registered}
+			if m.Text != r.Pattern && len(methods) == 1 {
+				m.Alts = []string{r.Pattern}
+			}
+			add("api.md", m)
+		}
+		if r.Body != nil {
+			okBodies = append(okBodies, r.Body.Type)
+		}
 		for _, p := range r.Params {
 			add("api.md", Mention{Kind: "param", Text: p.Name, Source: fmt.Sprintf("%s param of %s, read at %s", p.In, r.Pattern, p.Pos)})
 		}
@@ -107,10 +118,7 @@ func DocMentions(f *gofacts.Facts) map[string][]Mention {
 		}
 	}
 
-	for _, c := range f.Constants {
-		if c.Package == "apispec" {
-			continue
-		}
+	for _, c := range RuleConstants(f) {
 		m := Mention{Kind: "constant", Text: c.Name, Source: c.Pos}
 		if v := strings.Trim(c.Value, `"`); len(v) > 1 && v != c.Name {
 			if _, err := strconv.ParseFloat(v, 64); err != nil {
@@ -132,6 +140,28 @@ func DocMentions(f *gofacts.Facts) map[string][]Mention {
 
 	for _, t := range f.MakeTargets {
 		add("testing.md", Mention{Kind: "make_target", Text: t.Name, Source: "Makefile"})
+	}
+	return out
+}
+
+// MaxRuleConstants bounds the constants the business rules page must name,
+// so a large module still fits one page and one prompt.
+const MaxRuleConstants = 40
+
+// RuleConstants are the constants the business rules page must name: the
+// ones the route handlers reach, nearest first, then in source order, at
+// most MaxRuleConstants. Constants no handler reaches (CLI flags, migration
+// versions) are not business rules of the API.
+func RuleConstants(f *gofacts.Facts) []gofacts.Constant {
+	var out []gofacts.Constant
+	for _, c := range f.Constants {
+		if c.Reach > 0 && c.Package != "apispec" {
+			out = append(out, c)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Reach < out[j].Reach })
+	if len(out) > MaxRuleConstants {
+		out = out[:MaxRuleConstants]
 	}
 	return out
 }

@@ -202,6 +202,92 @@ func TestCheckSpec(t *testing.T) {
 	}
 }
 
+// TestCheckSpecMethodsAndBodies covers routes registered without a method
+// and handlers that decode a request body.
+func TestCheckSpecMethodsAndBodies(t *testing.T) {
+	ok := func(status int, body string) gofacts.ResponseSite {
+		return gofacts.ResponseSite{Status: status, Body: body, Pos: "h.go:1"}
+	}
+	facts := &gofacts.Facts{Routes: []gofacts.Route{
+		{Pattern: "GET /orders", Method: "GET", Path: "/orders", Handler: "api.listOrders", Responses: []gofacts.ResponseSite{ok(200, "[]api.Order")}},
+		{Pattern: "POST /orders", Method: "POST", Path: "/orders", Handler: "api.createOrder", Responses: []gofacts.ResponseSite{ok(201, "api.Order")},
+			Body: &gofacts.RequestBody{Type: "api.CreateOrder", Pos: "h.go:5"}},
+		{Pattern: "/notes", Methods: []string{"PUT"}, Path: "/notes", Handler: "api.notes", Responses: []gofacts.ResponseSite{ok(200, "api.Note")},
+			Body: &gofacts.RequestBody{Type: "api.Note", Pos: "h.go:9"}},
+		{Pattern: "/ping", Path: "/ping", Handler: "api.ping", Responses: []gofacts.ResponseSite{ok(200, "map[string]string")}},
+	}}
+	ref := func(name string) map[string]any { return map[string]any{"$ref": "#/definitions/api." + name} }
+	body := func(name string) []any {
+		return []any{map[string]any{"name": "body", "in": "body", "required": true, "schema": ref(name)}}
+	}
+	resp := func(status string, schema any) map[string]any {
+		return map[string]any{status: map[string]any{"description": "OK", "schema": schema}}
+	}
+	good := func() map[string]any {
+		return map[string]any{"swagger": "2.0", "basePath": "/", "paths": map[string]any{
+			"/orders": map[string]any{
+				"get":  map[string]any{"responses": resp("200", map[string]any{"type": "array", "items": ref("Order")})},
+				"post": map[string]any{"parameters": body("CreateOrder"), "responses": resp("201", ref("Order"))},
+			},
+			"/notes": map[string]any{"put": map[string]any{"parameters": body("Note"), "responses": resp("200", ref("Note"))}},
+			"/ping": map[string]any{
+				"get":  map[string]any{"responses": resp("200", map[string]any{"type": "object"})},
+				"head": map[string]any{"responses": resp("200", map[string]any{"type": "object"})},
+			},
+		}}
+	}
+	tests := []struct {
+		name   string
+		mutate func(s map[string]any)
+		want   []string
+	}{
+		{name: "matches the facts", mutate: func(map[string]any) {}},
+		{name: "a checked method is missing", mutate: func(s map[string]any) {
+			delete(at(s, "paths"), "/notes")
+		}, want: []string{"/notes (handler api.notes at ): route is not in the spec: annotate the handler with @Router /notes [put]"}},
+		{name: "an unchecked method is invented", mutate: func(s map[string]any) {
+			at(s, "paths", "/notes")["post"] = map[string]any{}
+		}, want: []string{"post /notes: operation is not a route"}},
+		{name: "a method-blind route needs one operation", mutate: func(s map[string]any) {
+			delete(at(s, "paths"), "/ping")
+		}, want: []string{"/ping (handler api.ping at ): route is not in the spec: the handler does not check r.Method"}},
+		{name: "a method-blind route checks each operation", mutate: func(s map[string]any) {
+			at(s, "paths", "/ping", "head")["responses"] = resp("204", nil)
+		}, want: []string{"/ping (handler api.ping at ) HEAD: response 204 is documented", "/ping (handler api.ping at ) HEAD: status 200 is not documented"}},
+		{name: "array response", mutate: func(s map[string]any) {
+			at(s, "paths", "/orders", "get")["responses"] = resp("200", ref("Order"))
+		}, want: []string{"response 200 schema is not an array; the handler writes {array} api.Order"}},
+		{name: "missing body", mutate: func(s map[string]any) {
+			delete(at(s, "paths", "/orders", "post"), "parameters")
+		}, want: []string{"missing @Param body body api.CreateOrder true: the handler decodes the request body at h.go:5"}},
+		{name: "wrong body", mutate: func(s map[string]any) {
+			at(s, "paths", "/orders", "post")["parameters"] = body("Order")
+		}, want: []string{"body param body is api.Order; the handler decodes api.CreateOrder at h.go:5"}},
+		{name: "invented body", mutate: func(s map[string]any) {
+			at(s, "paths", "/orders", "get")["parameters"] = body("Order")
+		}, want: []string{"@Param body (in body) is not read by the handler: it decodes no request body"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := good()
+			tt.mutate(s)
+			data, err := json.Marshal(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := checkSpec(data, facts)
+			if len(got) != len(tt.want) {
+				t.Fatalf("got %d issues, want %d:\n%s", len(got), len(tt.want), Report{Gate: "A", Issues: got})
+			}
+			for i, is := range got {
+				if text := is.Where + ": " + is.Message; !strings.Contains(text, tt.want[i]) {
+					t.Errorf("issue %d = %q, want it to contain %q", i, text, tt.want[i])
+				}
+			}
+		})
+	}
+}
+
 func TestValidateSpec(t *testing.T) {
 	good, _ := json.Marshal(goodSpec())
 	tests := []struct {

@@ -69,9 +69,10 @@ func docsFacts() *gofacts.Facts {
 			{Name: "ErrorBody", Package: "api", Underlying: "struct", Fields: []gofacts.Field{{Name: "Code", Type: "string", JSON: "code"}}},
 		},
 		Constants: []gofacts.Constant{
-			{Name: "defaultQty", Package: "api", Type: "untyped int", Value: "1"},
-			{Name: "maxQty", Package: "api", Type: "untyped int", Value: "10"},
-			{Name: "KindBook", Package: "api", Type: "api.Kind", Value: "book"},
+			{Name: "defaultQty", Package: "api", Type: "untyped int", Value: "1", Reach: 1},
+			{Name: "maxQty", Package: "api", Type: "untyped int", Value: "10", Reach: 2},
+			{Name: "KindBook", Package: "api", Type: "api.Kind", Value: "book", Reach: 1},
+			{Name: "schemaVersion", Package: "migrate", Type: "untyped int", Value: "3"}, // no handler reaches it
 		},
 		Env:            []gofacts.EnvVar{{Name: "PORT", Default: "8080"}},
 		ServerSettings: []gofacts.Setting{{Name: "http.Server.Addr"}, {Name: "http.Server.ReadTimeout", Value: "5 * time.Second"}},
@@ -128,12 +129,32 @@ func TestDocMentions(t *testing.T) {
 		"docs/structure.md":      {"package cmd/server", "package internal/api"},
 		"docs/api.md":            {"route GET /items/{id}", "param id", "param qty", "field id", "field kind"},
 		"docs/errors.md":         {"field code", "error_code item_not_found", "status 405"},
-		"docs/business-rules.md": {"constant defaultQty", "constant maxQty", "constant KindBook"},
+		"docs/business-rules.md": {"constant defaultQty", "constant KindBook", "constant maxQty"}, // nearest first
 		"docs/configuration.md":  {"env PORT", "setting ReadTimeout"},
 		"docs/testing.md":        {"make_target run", "make_target test"},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("DocMentions =\n%v\nwant\n%v", got, want)
+	}
+}
+
+// TestDocMentionsMethodless covers routes registered without a method and
+// request bodies, whose fields the API page names like response fields.
+func TestDocMentionsMethodless(t *testing.T) {
+	f := &gofacts.Facts{
+		Routes: []gofacts.Route{
+			{Pattern: "/notes", Methods: []string{"GET", "PUT"}, Path: "/notes", Body: &gofacts.RequestBody{Type: "api.Note"}},
+			{Pattern: "/ping", Path: "/ping"},
+		},
+		Types: []gofacts.Type{{Name: "Note", Package: "api", Underlying: "struct", Fields: []gofacts.Field{{Name: "Text", Type: "string", JSON: "text"}}}},
+	}
+	var got []string
+	for _, m := range DocMentions(f)["docs/api.md"] {
+		got = append(got, m.Kind+" "+m.Text+" "+strings.Join(m.Alts, ","))
+	}
+	want := []string{"route GET /notes ", "route PUT /notes ", "route /ping ", "field text "}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("api.md mentions = %q, want %q", got, want)
 	}
 }
 

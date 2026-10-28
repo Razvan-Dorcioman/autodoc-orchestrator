@@ -3,6 +3,7 @@ package gofacts
 import (
 	"go/ast"
 	"go/constant"
+	"go/token"
 	"go/types"
 	"regexp"
 	"sort"
@@ -39,12 +40,15 @@ func (x *extractor) routes(sites []ResponseSite) []Route {
 			if h := x.handlerDecl(info, call.Args[1]); h != nil {
 				r.Handler = h.pkg.Name + "." + FuncName(h.decl)
 				r.HandlerPos = x.pos(h.decl.Pos())
-				x.analyzeHandler(&r, *h)
-				for _, s := range sites {
-					if s.Func == r.Handler {
-						r.Responses = append(r.Responses, s)
+				x.handlers = append(x.handlers, *h)
+				if r.Method == "" {
+					if split := x.dispatch(r, *h, sites); split != nil {
+						out = append(out, split...)
+						return true
 					}
+					r.Methods = methodsChecked(*h)
 				}
+				x.analyzeHandler(&r, *h, sites)
 			}
 			out = append(out, r)
 			return true
@@ -101,12 +105,319 @@ func (x *extractor) handlerDecl(info *types.Info, e ast.Expr) *funcDecl {
 	return &d
 }
 
-// analyzeHandler records the handler's inputs (r.PathValue, url.Values.Get),
-// the module constants it uses and the module functions it calls.
-func (x *extractor) analyzeHandler(r *Route, h funcDecl) {
+// httpMethods are the methods a route can be documented under.
+var httpMethods = map[string]bool{"GET": true, "HEAD": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "OPTIONS": true}
+
+// dispatch splits a method-less route whose handler switches on r.Method,
+// with a call to one module handler function per case, into one route per
+// method, each analysed as that function. The default case, typically the
+// dispatcher's own 405, belongs to no route. It returns nil when the handler
+// is not such a dispatcher.
+func (x *extractor) dispatch(r Route, h funcDecl, sites []ResponseSite) []Route {
+	if h.decl.Body == nil {
+		return nil
+	}
+	info := h.pkg.TypesInfo
+	for _, stmt := range h.decl.Body.List {
+		sw, ok := stmt.(*ast.SwitchStmt)
+		if !ok || sw.Init != nil || sw.Tag == nil || !isRequestField(info, sw.Tag, "Method") {
+			continue
+		}
+		var out []Route
+		var delegates []funcDecl
+		for _, s := range sw.Body.List {
+			clause := s.(*ast.CaseClause)
+			if clause.List == nil {
+				continue
+			}
+			d := x.delegate(info, clause.Body)
+			if d == nil {
+				return nil
+			}
+			for _, e := range clause.List {
+				m, ok := constString(info, e)
+				if !ok || !httpMethods[m] {
+					return nil
+				}
+				sub := r
+				sub.Method = m
+				sub.Pattern = m + " " + r.Pattern
+				sub.Dispatcher = r.Handler
+				sub.Handler = d.pkg.Name + "." + FuncName(d.decl)
+				sub.HandlerPos = x.pos(d.decl.Pos())
+				x.analyzeHandler(&sub, *d, sites)
+				out = append(out, sub)
+				delegates = append(delegates, *d)
+			}
+		}
+		x.handlers = append(x.handlers, delegates...)
+		return out
+	}
+	return nil
+}
+
+// delegate returns the module function a case body hands the request to:
+// a single call passing the http.ResponseWriter, optionally followed by a
+// bare return.
+func (x *extractor) delegate(info *types.Info, body []ast.Stmt) *funcDecl {
+	if len(body) == 2 {
+		if ret, ok := body[1].(*ast.ReturnStmt); ok && len(ret.Results) == 0 {
+			body = body[:1]
+		}
+	}
+	if len(body) != 1 {
+		return nil
+	}
+	es, ok := body[0].(*ast.ExprStmt)
+	if !ok {
+		return nil
+	}
+	call, ok := es.X.(*ast.CallExpr)
+	if !ok {
+		return nil
+	}
+	fn := callee(info, call)
+	if fn == nil {
+		return nil
+	}
+	d, ok := x.decls[fn]
+	if !ok {
+		return nil
+	}
+	for _, a := range call.Args {
+		if t := info.TypeOf(a); t != nil && isResponseWriter(t) {
+			return &d
+		}
+	}
+	return nil
+}
+
+// methodsChecked lists the methods the handler compares r.Method with, in
+// an ==, a != or a switch case, sorted.
+func methodsChecked(h funcDecl) []string {
+	if h.decl.Body == nil {
+		return nil
+	}
+	info := h.pkg.TypesInfo
+	seen := map[string]bool{}
+	check := func(e ast.Expr) {
+		if m, ok := constString(info, e); ok && httpMethods[m] {
+			seen[m] = true
+		}
+	}
+	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.BinaryExpr:
+			if n.Op != token.EQL && n.Op != token.NEQ {
+				return true
+			}
+			if isRequestField(info, n.X, "Method") {
+				check(n.Y)
+			} else if isRequestField(info, n.Y, "Method") {
+				check(n.X)
+			}
+		case *ast.SwitchStmt:
+			if n.Tag != nil && isRequestField(info, n.Tag, "Method") {
+				for _, s := range n.Body.List {
+					for _, e := range s.(*ast.CaseClause).List {
+						check(e)
+					}
+				}
+			}
+		}
+		return true
+	})
+	if len(seen) == 0 {
+		return nil
+	}
+	return sortedKeys(seen)
+}
+
+// isRequestField reports whether e selects the named field of a
+// net/http.Request, as in r.Method or r.Body.
+func isRequestField(info *types.Info, e ast.Expr, field string) bool {
+	sel, ok := ast.Unparen(e).(*ast.SelectorExpr)
+	if !ok || sel.Sel.Name != field {
+		return false
+	}
+	s, ok := info.Selections[sel]
+	return ok && s.Kind() == types.FieldVal && strings.TrimPrefix(types.TypeString(s.Recv(), nil), "*") == "net/http.Request"
+}
+
+// requestBody finds the type the handler decodes the request body into:
+// the target of a json Decoder's Decode or of json.Unmarshal in a function
+// that reads the request's Body, either the handler itself or a module
+// helper the handler passes the target to, such as decode(r, &in).
+func (x *extractor) requestBody(h funcDecl) *RequestBody {
+	info := h.pkg.TypesInfo
+	for _, t := range decodeTargets(h) {
+		if name, ok := bodyType(info.TypeOf(t.target)); ok {
+			return &RequestBody{Type: name, Pos: x.pos(t.call.Pos())}
+		}
+	}
+	var out *RequestBody
+	ast.Inspect(h.decl.Body, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || out != nil {
+			return out == nil
+		}
+		fn := callee(info, call)
+		if fn == nil {
+			return true
+		}
+		d, ok := x.decls[fn]
+		if !ok {
+			return true
+		}
+		params := paramObjects(d.pkg.TypesInfo, d.decl)
+		for _, t := range decodeTargets(d) {
+			id, ok := ast.Unparen(t.target).(*ast.Ident)
+			if !ok {
+				continue
+			}
+			for i, p := range params {
+				if p == nil || i >= len(call.Args) || d.pkg.TypesInfo.Uses[id] != p {
+					continue
+				}
+				if name, ok := bodyType(info.TypeOf(call.Args[i])); ok {
+					out = &RequestBody{Type: name, Pos: x.pos(call.Pos()), Via: d.pkg.Name + "." + FuncName(d.decl)}
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return out
+}
+
+type decodeTarget struct {
+	call   *ast.CallExpr
+	target ast.Expr
+}
+
+// decodeTargets lists what a function decodes JSON into, if it reads the
+// body of a net/http.Request: the argument of (*json.Decoder).Decode and
+// the second argument of json.Unmarshal.
+func decodeTargets(fd funcDecl) []decodeTarget {
+	if fd.decl.Body == nil {
+		return nil
+	}
+	info := fd.pkg.TypesInfo
+	readsBody := false
+	var out []decodeTarget
+	ast.Inspect(fd.decl.Body, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.SelectorExpr:
+			readsBody = readsBody || isRequestField(info, n, "Body")
+		case *ast.CallExpr:
+			fn := callee(info, n)
+			if fn == nil || fn.Pkg() == nil || fn.Pkg().Path() != "encoding/json" {
+				return true
+			}
+			switch {
+			case fn.Name() == "Decode" && recvType(fn) == "*encoding/json.Decoder" && len(n.Args) == 1:
+				out = append(out, decodeTarget{n, n.Args[0]})
+			case fn.Name() == "Unmarshal" && recvType(fn) == "" && len(n.Args) == 2:
+				out = append(out, decodeTarget{n, n.Args[1]})
+			}
+		}
+		return true
+	})
+	if !readsBody {
+		return nil
+	}
+	return out
+}
+
+// bodyType names the type a decode target points to; an interface, such as
+// a helper's v any, says nothing about the body.
+func bodyType(t types.Type) (string, bool) {
+	if t == nil {
+		return "", false
+	}
+	if p, ok := t.(*types.Pointer); ok {
+		t = p.Elem()
+	}
+	if types.IsInterface(t) {
+		return "", false
+	}
+	return typeName(t), true
+}
+
+// reach sets, on every function and constant a route handler reaches
+// through module calls, the call depth from the nearest handler, so the
+// pages that cannot list everything of a large module list these first. A
+// constant of a named type a reached function uses counts as used there:
+// converting to the type is checking against its values.
+func (x *extractor) reach(f *Facts) {
+	funcs, consts, named := map[string]int{}, map[string]int{}, map[string]int{} // position or type name -> depth
+	type item struct {
+		d     funcDecl
+		depth int
+	}
+	var queue []item
+	for _, h := range x.handlers {
+		queue = append(queue, item{h, 1})
+	}
+	for len(queue) > 0 {
+		it := queue[0]
+		queue = queue[1:]
+		pos := x.pos(it.d.decl.Pos())
+		if _, done := funcs[pos]; done {
+			continue
+		}
+		funcs[pos] = it.depth
+		if it.d.decl.Body == nil {
+			continue
+		}
+		info := it.d.pkg.TypesInfo
+		ast.Inspect(it.d.decl.Body, func(n ast.Node) bool {
+			id, ok := n.(*ast.Ident)
+			if !ok {
+				return true
+			}
+			switch obj := info.Uses[id].(type) {
+			case *types.Const:
+				if p := x.pos(obj.Pos()); x.inModule(obj.Pkg()) && consts[p] == 0 {
+					consts[p] = it.depth
+				}
+			case *types.TypeName:
+				if t := typeName(obj.Type()); x.inModule(obj.Pkg()) && named[t] == 0 {
+					named[t] = it.depth
+				}
+			case *types.Func:
+				if d, ok := x.decls[obj.Origin()]; ok {
+					queue = append(queue, item{d, it.depth + 1})
+				}
+			}
+			return true
+		})
+	}
+	for i := range f.Functions {
+		f.Functions[i].Reach = funcs[f.Functions[i].Pos]
+	}
+	for i := range f.Constants {
+		c := &f.Constants[i]
+		c.Reach = consts[c.Pos]
+		if d := named[c.Type]; d > 0 && (c.Reach == 0 || d < c.Reach) {
+			c.Reach = d
+		}
+	}
+}
+
+// analyzeHandler records the handler's inputs (r.PathValue, url.Values.Get,
+// a JSON request body), the module constants it uses, the module functions
+// it calls and the responses it writes.
+func (x *extractor) analyzeHandler(r *Route, h funcDecl, sites []ResponseSite) {
+	for _, s := range sites {
+		if s.Func == r.Handler {
+			r.Responses = append(r.Responses, s)
+		}
+	}
 	if h.decl.Body == nil {
 		return
 	}
+	r.Body = x.requestBody(h)
 	info := h.pkg.TypesInfo
 	seenParam := map[string]bool{}
 	consts := map[string]bool{}
@@ -192,7 +503,8 @@ func (x *extractor) responseSites() []ResponseSite {
 					strs = append(strs, s)
 				} else if f, ok := sprintfFormat(info, a); ok {
 					strs = append(strs, f)
-				} else if t := info.TypeOf(a); t != nil && site.Body == "" && !isResponseWriter(t) {
+				} else if t := info.TypeOf(a); t != nil && site.Body == "" && !isResponseWriter(t) && !isString(t) {
+					// A non-constant string, such as err.Error(), is a message, not the body.
 					site.Body = typeName(t)
 				}
 			}
@@ -248,6 +560,11 @@ func sprintfFormat(info *types.Info, e ast.Expr) (string, bool) {
 
 func isResponseWriter(t types.Type) bool {
 	return types.TypeString(t, nil) == "net/http.ResponseWriter"
+}
+
+func isString(t types.Type) bool {
+	b, ok := t.(*types.Basic)
+	return ok && b.Info()&types.IsString != 0
 }
 
 // helperBody finds the body type a helper writes when its status parameter is
