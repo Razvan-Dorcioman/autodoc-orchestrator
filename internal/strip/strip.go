@@ -29,8 +29,9 @@ type Result struct {
 	Deleted []string `json:"deleted"` // generated spec files deleted, slash paths
 }
 
-// Run strips annotation lines from every .go file under dir (except .git)
-// and deletes the generated files in SpecDir.
+// Run strips annotation lines from the non-test .go files under dir, outside
+// the directories skipDir names, and deletes the generated files in SpecDir.
+// Those are the files patch_comment may write and commit may stage.
 func Run(dir string) (Result, error) {
 	res := Result{Deleted: []string{}}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, err error) error {
@@ -38,12 +39,12 @@ func Run(dir string) (Result, error) {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" {
+			if path != dir && skipDir(d.Name()) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
-		if !strings.HasSuffix(path, ".go") {
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
 		src, err := os.ReadFile(path)
@@ -83,10 +84,53 @@ func Run(dir string) (Result, error) {
 	return res, nil
 }
 
+// swagAttrs are the attributes swag v1.16.6 reads, lowercased: it matches
+// them case-insensitively.
+var swagAttrs = map[string]bool{
+	// operations
+	"accept": true, "produce": true, "param": true, "success": true, "failure": true,
+	"response": true, "header": true, "tags": true, "router": true, "deprecatedrouter": true,
+	"summary": true, "description": true, "description.markdown": true, "id": true,
+	"deprecated": true, "security": true, "state": true,
+	// general API info
+	"title": true, "version": true, "termsofservice": true, "host": true, "hoststate": true,
+	"basepath": true, "schemes": true, "query.collection.format": true,
+	// inside a security definition
+	"in": true, "name": true, "tokenurl": true, "authorizationurl": true,
+}
+
+// swagFamilies start attribute names swag reads as a family, such as
+// @contact.email, @tag.name, @securityDefinitions.apikey or @x-logo.
+var swagFamilies = []string{"x-", "tag.", "contact.", "license.", "externaldocs.", "securitydefinitions.", "scope."}
+
 // IsAnnotation reports whether a line comment's text is a swag annotation:
-// "// @…" or "//@…".
+// "// @Attr…" or "//@Attr…" with an attribute swag reads. Other "// @"
+// comments, such as "// @see" or "// @todo", belong to the code's authors.
 func IsAnnotation(comment string) bool {
-	return strings.HasPrefix(comment, "// @") || strings.HasPrefix(comment, "//@")
+	text, ok := strings.CutPrefix(comment, "// @")
+	if !ok {
+		if text, ok = strings.CutPrefix(comment, "//@"); !ok {
+			return false
+		}
+	}
+	attr, _, _ := strings.Cut(strings.ToLower(text), " ")
+	attr, _, _ = strings.Cut(attr, "\t")
+	if swagAttrs[attr] {
+		return true
+	}
+	for _, f := range swagFamilies {
+		if strings.HasPrefix(attr, f) && len(attr) > len(f) {
+			return true
+		}
+	}
+	return false
+}
+
+// skipDir reports whether Run leaves a directory alone: .git and the
+// directories the go tool ignores (vendor, testdata, ".x", "_x"), which swag
+// does not read and a run must not change.
+func skipDir(name string) bool {
+	return name == "vendor" || name == "testdata" || strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
 }
 
 // Lines returns src without its annotation lines, and how many it removed.

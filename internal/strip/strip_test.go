@@ -35,7 +35,17 @@ func TestLines(t *testing.T) {
 		{
 			name: "other comments are kept",
 			src:  "package a\n\n//go:generate x\n// plain @ comment\n// @\nfunc f() {}\n",
-			want: "package a\n\n//go:generate x\n// plain @ comment\nfunc f() {}\n", removed: 1,
+			want: "package a\n\n//go:generate x\n// plain @ comment\n// @\nfunc f() {}\n",
+		},
+		{
+			name: "only attributes swag reads, in any case",
+			src:  "package a\n\n// @see Other\n// @todo fix\n//@author me\n// @Summaryx F\n// @ROUTER /f [get]\n// @contact.email a@b.c\n// @x-logo {}\n// @tag.\nfunc f() {}\n",
+			want: "package a\n\n// @see Other\n// @todo fix\n//@author me\n// @Summaryx F\n// @tag.\nfunc f() {}\n", removed: 3,
+		},
+		{
+			name: "attribute followed by a tab",
+			src:  "package a\n// @Param\tid path int true \"ID\"\nfunc f() {}\n",
+			want: "package a\nfunc f() {}\n", removed: 1,
 		},
 		{
 			name: "CRLF",
@@ -70,7 +80,20 @@ func TestRun(t *testing.T) {
 	}
 	write("cmd/server/main.go", "package main\n\n// @title X\nfunc main() {}\n")
 	write("internal/a/a.go", "package a\n")
-	write(".git/hooks/x.go", "// @kept because .git is skipped\n")
+	write("internal/a/b.go", "package a\n\n// @see A\nfunc b() {}\n")
+	// Files a run may not change keep their annotations.
+	kept := map[string]string{
+		".git/hooks/x.go":             "// @Summary kept because .git is skipped\n",
+		"internal/a/a_test.go":        "package a\n\n// @Summary kept in a test file\nfunc f() {}\n",
+		"vendor/x/x.go":               "package x\n\n// @Summary kept in vendor\nfunc f() {}\n",
+		"internal/a/testdata/x.go":    "package x\n\n// @Summary kept in testdata\nfunc f() {}\n",
+		"_examples/x.go":              "package x\n\n// @Summary kept in a dir the go tool ignores\nfunc f() {}\n",
+		"internal/.hidden/x.go":       "package x\n\n// @Summary kept in a hidden dir\nfunc f() {}\n",
+		"internal/a/b_test_helper.go": "package a\n\n// @Summary not a test file, so stripped\nfunc g() {}\n",
+	}
+	for rel, content := range kept {
+		write(rel, content)
+	}
 	write("internal/apispec/swagger.json", "{}")
 	write("internal/apispec/swagger.yaml", "{}")
 	write("internal/apispec/apispec.go", "package apispec\n")
@@ -79,12 +102,22 @@ func TestRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := Result{Files: 1, Lines: 1, Deleted: []string{"internal/apispec/swagger.json", "internal/apispec/swagger.yaml"}}
+	want := Result{Files: 2, Lines: 2, Deleted: []string{"internal/apispec/swagger.json", "internal/apispec/swagger.yaml"}}
 	if !reflect.DeepEqual(res, want) {
 		t.Errorf("Run() = %+v, want %+v", res, want)
 	}
 	if b, _ := os.ReadFile(filepath.Join(dir, "cmd/server/main.go")); string(b) != "package main\n\nfunc main() {}\n" {
 		t.Errorf("main.go = %q", b)
+	}
+	if b, _ := os.ReadFile(filepath.Join(dir, "internal/a/b_test_helper.go")); string(b) != "package a\n\nfunc g() {}\n" {
+		t.Errorf("b_test_helper.go = %q", b)
+	}
+	delete(kept, "internal/a/b_test_helper.go")
+	kept["internal/a/b.go"] = "package a\n\n// @see A\nfunc b() {}\n"
+	for rel, content := range kept {
+		if b, _ := os.ReadFile(filepath.Join(dir, filepath.FromSlash(rel))); string(b) != content {
+			t.Errorf("%s = %q, want it unchanged", rel, b)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(dir, "internal/apispec/apispec.go")); err != nil {
 		t.Errorf("hand-written apispec.go was removed: %v", err)

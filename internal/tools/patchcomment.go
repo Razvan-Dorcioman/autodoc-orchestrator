@@ -158,6 +158,8 @@ func checkLines(lines []string) error {
 			return fmt.Errorf("line %d contains a line break; pass one annotation per list element", i+1)
 		case !strings.HasPrefix(l, "// @") || len(l) == len("// @") || !isLetter(l[len("// @")]):
 			return fmt.Errorf("line %d %q is not a swag annotation: every line must start with '// @' followed by an attribute name such as Summary, Param or Router; code and other comments cannot be changed", i+1, l)
+		case !strip.IsAnnotation(l):
+			return fmt.Errorf("line %d %q: swag has no such attribute; use one it reads, such as Summary, Description, Tags, Param, Success, Failure or Router", i+1, l)
 		}
 	}
 	return nil

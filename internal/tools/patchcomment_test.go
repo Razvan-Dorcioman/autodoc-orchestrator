@@ -103,6 +103,7 @@ func TestPatchCommentRejects(t *testing.T) {
 		{"struct tag smuggled in a line break", PatchCommentArgs{File: file, Func: "(*handlers).product", Lines: []string{"// @Summary S\ntype T struct{}"}}, "line break"},
 		{"block comment", PatchCommentArgs{File: file, Func: "(*handlers).product", Lines: []string{"/* @Summary S */"}}, "not a swag annotation"},
 		{"bare at sign", PatchCommentArgs{File: file, Func: "(*handlers).product", Lines: []string{"// @ "}}, "not a swag annotation"},
+		{"attribute swag does not read", PatchCommentArgs{File: file, Func: "(*handlers).product", Lines: []string{"// @Summary S", "// @see other"}}, "no such attribute"},
 		{"no lines", PatchCommentArgs{File: file, Func: "(*handlers).product"}, "empty"},
 		{"unknown func", PatchCommentArgs{File: file, Func: "(*handlers).missing", Lines: ok}, "it declares: (*handlers).product, (*handlers).healthz, inline"},
 		{"func not at line start", PatchCommentArgs{File: file, Func: "inline", Lines: ok}, "does not start its line"},
