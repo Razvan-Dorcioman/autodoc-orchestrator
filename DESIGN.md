@@ -37,7 +37,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | Docs agent | LLM | Eight `docs/` pages: overview, structure, request flow, API, business rules, errors, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (one page per turn) |
 | Gate B | det | See *Verification* | — |
 | Judge | LLM | Split docs into claims; verify each against its cited code; failed claims go back to the docs agent | — (the cited code is in the message) |
-| commit | det | One separate commit on the branch; push / open MR only if a token is set; write run summary | git |
+| commit | det | One commit by `autodoc` on `autodoc/<base-sha>`, after re-checking that every staged path is a non-test `.go` file, `internal/apispec/` or a docs page; nothing changed → no commit, status `unchanged`. With `AUTODOC_GIT_TOKEN`, push the branch to the https origin (token in an env-scoped `http.extraHeader`, never in args or `.git/config`; `--force-with-lease`, so a re-run replaces its own branch); a failed push keeps the local commit and fails the run. No MR is opened | git |
 
 CLI: `autodoc run --repo <url|path> [--main <file>] [--run-tests]` → working copy in a temp dir, output in `runs/<run-id>/`. Nothing about the target is configured: everything comes from its type-checked code.
 
@@ -72,7 +72,7 @@ Deterministic (all must pass):
 Model-judged:
 - **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged. Only *unsupported* fails; *unverifiable* (the cited code doesn't decide it) is reported. Budget: 60 claims per pass, riskiest first (checklist words, numbers, rule pages); the rest are reported as skipped. Verdicts are cached by line + snippet, so a re-check after a fix judges only what changed. Gate B and the judge share the ≤2 docs attempts; after a fix gate B must pass again before the judge runs.
 
-**On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git checkout -- .` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
+**On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 for docs). If attempts run out, the workdir is reset to the baseline (`git reset --hard` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
 **Stop conditions:** all gates green; retry limit reached; token/cost budget exceeded; per-agent tool-call cap reached; judge claim budget reached (remaining claims skipped).
 
@@ -84,7 +84,7 @@ Model-judged:
 ## Trace
 
 - `runs/<run-id>/trace.jsonl`: one event per step start/end, agent turn (final reply), tool call (args, result size, error), model call (model, tokens in/out, latency, estimated cost), retry, gate result.
-- `runs/<run-id>/summary.json`: totals per step and per model, retries, final status, approximate cost (price table in code).
+- `runs/<run-id>/summary.json`: status (`committed`, `unchanged`, `failed` with the failed step and error, `incomplete` if interrupted), totals, each step's duration, error and model calls/tokens, calls and tokens per model, and the result (source, base SHA, branch, commit, files, pushed-to URL). No cost estimate: the default models are free.
 
 ## Known limitations
 
@@ -109,5 +109,5 @@ Model-judged:
 ## Open items
 
 - Hard per-run token/cost budget value (TBD).
-- Push target for the deliverable run (fork vs local branch only).
+- Opening an MR/PR after the push.
 - How AI coding assistants were used to build the orchestrator (to fill in at the end).

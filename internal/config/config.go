@@ -35,6 +35,7 @@ type Config struct {
 	AgentModels []string // AUTODOC_AGENT_MODEL: swagger and docs agents, comma-separated fallback chain
 	JudgeModels []string // AUTODOC_JUDGE_MODEL: grounding judge, comma-separated fallback chain
 	MaxCalls    int      // model calls allowed per agent before it is stopped
+	GitToken    string   // AUTODOC_GIT_TOKEN: when set, the run branch is pushed to the https origin with it
 }
 
 // Load reads .env in the working directory, if present, then the environment.
@@ -44,7 +45,7 @@ func Load() (Config, error) {
 	if err := LoadDotEnv(".env"); err != nil {
 		return Config{}, fmt.Errorf("load .env: %w", err)
 	}
-	cfg := Config{MaxCalls: 25}
+	cfg := Config{MaxCalls: 25, GitToken: strings.TrimSpace(os.Getenv("AUTODOC_GIT_TOKEN"))}
 
 	kind := strings.ToLower(strings.TrimSpace(os.Getenv("AUTODOC_PROVIDER")))
 	if kind == "" {

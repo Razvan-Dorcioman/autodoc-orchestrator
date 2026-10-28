@@ -84,17 +84,28 @@ func cmdRun(ctx context.Context, args []string) error {
 	t := rec.Totals()
 	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d\n",
 		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens)
+	defer fmt.Println("status:", rec.Summary().Status, "summary:", filepath.Join(rec.Dir(), "summary.json"))
+	if res.Commit != "" {
+		// A failed push leaves the commit on the local branch.
+		fmt.Printf("commit: %s on %s in %s (%d files)\n", res.Commit, res.Repo.Branch, res.Repo.Dir, len(res.Files))
+	}
 	if err != nil {
 		return err
 	}
-	fmt.Println("working copy:", res.Repo.Dir, "branch:", res.Repo.Branch)
 	fmt.Println("facts:", res.FactsPath)
 	fmt.Println("general API info:", res.Main)
 	fmt.Println("spec:", res.SpecDir)
 	fmt.Println("spec route:", res.Route)
 	fmt.Println("docs:", filepath.Dir(res.Docs[0]))
 	fmt.Println("judge:", res.Judge)
-	fmt.Println("stopped after the judge: the commit step is not implemented yet")
+	switch {
+	case res.PushedTo != "":
+		fmt.Println("pushed:", res.Repo.Branch, "to", res.PushedTo)
+	case res.Commit == "":
+		fmt.Println("nothing to commit: the result equals the base commit")
+	default:
+		fmt.Println("not pushed: set AUTODOC_GIT_TOKEN to push the branch")
+	}
 	return nil
 }
 

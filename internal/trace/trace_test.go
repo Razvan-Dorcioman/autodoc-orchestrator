@@ -59,3 +59,44 @@ func TestRecorderWritesTraceAndSummary(t *testing.T) {
 		t.Errorf("summary = %+v", s)
 	}
 }
+
+func TestSummaryStepsModelsAndOutcome(t *testing.T) {
+	rec, err := New(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.Emit(Event{Type: StepStart, Step: "docs"})
+	rec.Emit(Event{Type: ModelCall, Step: "docs", Model: "m1", TotalTokens: 10})
+	rec.Emit(Event{Type: ModelCall, Step: "judge", Model: "m2", TotalTokens: 5}) // inside the docs step
+	rec.Emit(Event{Type: StepEnd, Step: "docs"})
+	rec.Emit(Event{Type: StepStart, Step: "commit"})
+	rec.Emit(Event{Type: StepEnd, Step: "commit", Error: "boom"})
+	if s := rec.Summary(); s.Status != Incomplete || s.FailedStep != "" {
+		t.Errorf("before Finish: %+v", s)
+	}
+	rec.Finish(Failed, map[string]string{"branch": "autodoc/abc"})
+	if err := rec.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(rec.Dir(), "summary.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var s Summary
+	if err := json.Unmarshal(data, &s); err != nil {
+		t.Fatal(err)
+	}
+	if s.Status != Failed || s.FailedStep != "commit" || s.Error != "boom" || s.ModelCalls != 2 {
+		t.Errorf("summary = %+v", s)
+	}
+	if len(s.Steps) != 2 || s.Steps[0].ModelCalls != 2 || s.Steps[0].TotalTokens != 15 || s.Steps[1].Error != "boom" {
+		t.Errorf("steps = %+v", s.Steps)
+	}
+	if s.Models["m1"].Calls != 1 || s.Models["m2"].TotalTokens != 5 {
+		t.Errorf("models = %+v", s.Models)
+	}
+	if r, _ := s.Result.(map[string]any); r["branch"] != "autodoc/abc" {
+		t.Errorf("result = %v", s.Result)
+	}
+}

@@ -89,3 +89,70 @@ func mustGit(t *testing.T, dir string, args ...string) string {
 	}
 	return out
 }
+
+func TestCommit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init", "--quiet", "-b", "main")
+	write := func(rel, content string) {
+		t.Helper()
+		path := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("a.go", "package a\n")
+	mustGit(t, dir, "add", ".")
+	mustGit(t, dir, "-c", "user.name=t", "-c", "user.email=t@example.com", "commit", "--quiet", "-m", "init")
+	inDocs := func(p string) bool { return p == "a.go" || strings.HasPrefix(p, "docs/") }
+
+	if sha, files, err := Commit(ctx, dir, "nothing", inDocs); sha != "" || files != nil || err != nil {
+		t.Errorf("clean tree: Commit = %q, %v, %v; want no commit", sha, files, err)
+	}
+
+	write("a.go", "package a\n\n// @title X\n")
+	write("docs/api.md", "# API\n")
+	write("secrets.txt", "x")
+	if _, _, err := Commit(ctx, dir, "out of scope", inDocs); err == nil || !strings.Contains(err.Error(), "secrets.txt") {
+		t.Errorf("out of scope: err = %v, want one naming secrets.txt", err)
+	}
+	if err := os.Remove(filepath.Join(dir, "secrets.txt")); err != nil {
+		t.Fatal(err)
+	}
+
+	sha, files, err := Commit(ctx, dir, "Add docs\n\nRun: r1", inDocs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sha != mustGit(t, dir, "rev-parse", "HEAD") || strings.Join(files, " ") != "a.go docs/api.md" {
+		t.Errorf("Commit = %q, %v", sha, files)
+	}
+	if got := mustGit(t, dir, "log", "-1", "--format=%an <%ae>|%B"); got != Author+"|Add docs\n\nRun: r1" {
+		t.Errorf("commit = %q", got)
+	}
+}
+
+func TestPushNeedsHTTPSAndHidesTheToken(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	mustGit(t, dir, "init", "--quiet", "-b", "main")
+	mustGit(t, dir, "remote", "add", "origin", filepath.Join(t.TempDir(), "src"))
+	if _, err := Push(ctx, dir, "main", "s3cret"); err == nil || !strings.Contains(err.Error(), "not an https URL") {
+		t.Errorf("local origin: err = %v, want a refusal", err)
+	}
+
+	mustGit(t, dir, "remote", "set-url", "origin", "https://127.0.0.1:1/nobody/repo.git")
+	url, err := Push(ctx, dir, "main", "s3cret")
+	if err == nil || url != "https://127.0.0.1:1/nobody/repo.git" {
+		t.Fatalf("unreachable origin: %q, %v; want an error", url, err)
+	}
+	if strings.Contains(err.Error(), "s3cret") || strings.Contains(err.Error(), "Authorization") {
+		t.Errorf("the error leaks the credentials: %v", err)
+	}
+	if cfg := mustGit(t, dir, "config", "--list", "--local"); strings.Contains(cfg, "extraheader") {
+		t.Errorf("the token header was written to .git/config:\n%s", cfg)
+	}
+}
