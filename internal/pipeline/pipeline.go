@@ -47,7 +47,7 @@ type Input struct {
 // Result is what a run leaves behind.
 type Result struct {
 	Repo      *repo.Repo
-	FactsPath string
+	FactsPath string          // facts.json, then facts_annotated.json: the facts the docs are written from
 	Main      string          // file that holds the general API info
 	Route     *specroute.Plan // where GET /openapi.json is registered
 	SpecDir   string          // the generated swagger.json and swagger.yaml, once gate A is green
@@ -220,10 +220,12 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 		// The annotations moved every line below them, so the docs, gate B and
 		// the judge need the positions of the code as it is now.
 		err = step(rec, "reindex", func() (string, error) {
-			facts, err = reindex(ctx, workDir, facts, filepath.Join(rec.Dir(), "facts_annotated.json"))
+			path := filepath.Join(rec.Dir(), "facts_annotated.json")
+			facts, err = reindex(ctx, workDir, facts, path)
 			if err != nil {
 				return "", err
 			}
+			res.FactsPath = path
 			return fmt.Sprintf("%d routes at their annotated positions", len(facts.Routes)), nil
 		})
 	}
