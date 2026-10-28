@@ -23,7 +23,7 @@ Orchestrator that points at any Go HTTP service (developed against `catalog-poc`
 fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add route ─► reindex ─► DOCS AGENT ─► gate B ─► JUDGE ─► commit
  det      det      det      LLM (Flash)      det        det          det       LLM (Flash)    det     LLM (Pro)   det
                               ▲                │                                  ▲             │        │
-                              └─ errors (≤3) ──┘                                  └─ ≤2 each ───┴────────┘
+                              └─ errors (≤3) ──┘                                  └─ ≤3 / 2 ────┴────────┘
 ```
 
 | Step | Kind | Responsibility | Tools |
@@ -71,9 +71,9 @@ Deterministic (all must pass):
 - **Scope:** only `// @` lines in `.go` files, `docs/`, `internal/apispec/` and the one route line changed; the docs step changes only its pages.
 
 Model-judged:
-- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged. Only *unsupported* sends a line back; *unverifiable* (the cited code doesn't decide it) is reported. Budget: 60 claims per pass, riskiest first (checklist words, numbers, rule pages); the rest are reported as skipped. Verdicts are cached by line + snippet, so a re-check after a fix judges only what changed. Gate B and the judge have separate attempts: gate B ≤2 runs in a row, starting over after each judge fix, and blocking; the judge 2 passes, so its findings always get one fix turn, and gate B must pass again before the second. The second pass is advisory: the judge is a model and can be wrong (in a catalog-poc run it rejected `float` as "not a Go type" for a JSON number), so the claims it still finds unsupported are committed for review and listed in `judge.json` (`advisory: true`), `summary.json` (`unsupported_claims`) and the commit message, instead of throwing the run away.
+- **Claim fact-check (Pro):** each docs claim judged *supported / unsupported / unverifiable* against its cited code. Unsupported claims are sent back with the judge's reason. The judge gets a generic checklist of things that are easy to get subtly wrong, applied to whatever the cited code does: units and integer vs. decimal arithmetic, rounding direction, order of operations (convert then multiply, or the reverse), defaults and caps, fields that appear only under a condition (`omitempty`), validation order (which error wins when several apply), case and whitespace handling, and deliberate omissions such as data not logged. Only *unsupported* sends a line back; *unverifiable* (the cited code doesn't decide it) is reported. Budget: 60 claims per pass, riskiest first (checklist words, numbers, rule pages); the rest are reported as skipped. Verdicts are cached by line + snippet, so a re-check after a fix judges only what changed. Gate B and the judge have separate attempts: gate B ≤3 runs in a row, starting over after each judge fix, and blocking; the judge 2 passes, so its findings always get one fix turn, and gate B must pass again before the second. The second pass is advisory: the judge is a model and can be wrong (in a catalog-poc run it rejected `float` as "not a Go type" for a JSON number), so the claims it still finds unsupported are committed for review and listed in `judge.json` (`advisory: true`), `summary.json` (`unsupported_claims`) and the commit message, instead of throwing the run away.
 
-**On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤2 in a row for gate B). If attempts run out, the workdir is reset to the baseline (`git reset --hard` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
+**On failure:** errors are fed back to the producing agent in the same session (≤3 gate runs for swagger, ≤3 in a row for gate B). If attempts run out, the workdir is reset to the baseline (`git reset --hard` + `git clean -fd`), nothing is committed, and the run exits non-zero with the gate report (also in `gate_a.json`).
 
 **Stop conditions:** all gates green; retry limit reached; run token budget used up (`AUTODOC_TOKEN_BUDGET`, default 1M: every agent together, as the trace counts tokens, checked before each model call; catalog-poc runs used up to ~270k), which fails the running step and resets like a gate failure; per-agent model-call cap (25) reached; judge claim budget reached (remaining claims skipped).
 
@@ -108,7 +108,13 @@ Model-judged:
 - Contract tests: hit the running service with requests generated from the spec and compare responses with the documented shapes and errors.
 - Langfuse/OTel exporter on top of the JSONL trace.
 
+## How AI assistants were used
+
+- **Tool:** Claude Code only (desktop app; Opus 5.5 for all but one commit, Sonnet 5.5 for that one). Late on, several sessions ran in parallel on one checkout, each owning separate files.
+- **Split:** the design (pipeline vs. agents, gates, what counts as evidence) was worked out in conversation; the assistant wrote the code, tests and commit messages, one step of the flow per commit.
+- **Verification:** every diff read before commit; `go test` plus end-to-end runs on catalog-poc, checking `trace.jsonl`, the gate reports and the target's diff.
+- **Where it fell short:** it overfit to catalog-poc (target-specific shortcuts, undone in `415f504`); it made gates stricter than a free model could pass, so the judge's last pass became advisory; and it wrote at length, which put this file over its page limit.
+
 ## Open items
 
 - Opening an MR/PR after the push.
-- How AI coding assistants were used to build the orchestrator (to fill in at the end).
