@@ -201,7 +201,7 @@ func TestMessage(t *testing.T) {
 		Page: "docs/api.md", Line: 7, Text: "| qty | 1 |", Context: "## GET /orders\n| Name | Default |", Inherited: true,
 		Citations: []verify.Citation{{Ref: "GET /orders", File: "internal/shop/handlers.go", Snippet: "  12  func get() {}"}},
 	})
-	code := "Cited code:\n`GET /orders` (internal/shop/handlers.go):\n```go\n  12  func get() {}\n```\n"
+	code := "Cited code:\ninternal/shop/handlers.go:\n```go\n  12  func get() {}\n```\nCited as `GET /orders`.\n"
 	if !strings.HasPrefix(msg, code) {
 		t.Errorf("message does not start with the cited code:\n%s", msg)
 	}
@@ -212,6 +212,30 @@ func TestMessage(t *testing.T) {
 	}
 	if !strings.HasSuffix(msg, "| qty | 1 |\n") {
 		t.Errorf("message does not end with the claim:\n%s", msg)
+	}
+
+	// A whole-file citation names the file once.
+	if msg := Message(verify.Claim{Text: "Go 1.22.", Citations: []verify.Citation{{Ref: "go.mod", File: "go.mod", Snippet: "1  module svc"}}}); strings.Contains(msg, "Cited as") {
+		t.Errorf("whole-file citation repeats the file:\n%s", msg)
+	}
+}
+
+// TestNearbyLinesShareTheCode: two lines citing different lines of the same
+// declaration get messages that are the same through the cited code.
+func TestNearbyLinesShareTheCode(t *testing.T) {
+	snippet := "  33  func main() {\n  34  \tsrv := &http.Server{\n  35  \t\tReadTimeout: 10 * time.Second,\n  36  \t\tWriteTimeout: 10 * time.Second,\n  37  \t}\n  38  }"
+	msg := func(ref, text string) string {
+		return Message(verify.Claim{Page: "docs/configuration.md", Line: 3, Text: text,
+			Citations: []verify.Citation{{Ref: ref, File: "cmd/server/main.go", Snippet: snippet}}})
+	}
+	a := msg("cmd/server/main.go:35", "ReadTimeout is 10s.")
+	b := msg("cmd/server/main.go:36", "WriteTimeout is 10s.")
+	shared := 0
+	for shared < min(len(a), len(b)) && a[shared] == b[shared] {
+		shared++
+	}
+	if end := strings.Index(a, "```\n") + len("```\n"); shared < end {
+		t.Errorf("messages diverge at byte %d, before the end of the code at %d:\n%s", shared, end, a[:shared])
 	}
 }
 

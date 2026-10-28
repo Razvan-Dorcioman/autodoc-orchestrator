@@ -322,7 +322,11 @@ func Message(c verify.Claim) string {
 	return b.String()
 }
 
-// citedCode is the start of a claim's message: the code it cites.
+// citedCode is the start of a claim's message: the code it cites, each
+// snippet under its file and followed by the reference the line used. Lines
+// citing nearby lines of a file (`main.go:35`, `main.go:36`) differ only in
+// that reference, since both resolve to the same declaration, so it comes
+// after the code they share.
 func citedCode(c verify.Claim) string {
 	var b strings.Builder
 	b.WriteString("Cited code:\n")
@@ -331,7 +335,10 @@ func citedCode(c verify.Claim) string {
 		if !strings.HasSuffix(ct.File, ".go") {
 			lang = ""
 		}
-		fmt.Fprintf(&b, "`%s` (%s):\n```%s\n%s\n```\n", ct.Ref, ct.File, lang, ct.Snippet)
+		fmt.Fprintf(&b, "%s:\n```%s\n%s\n```\n", ct.File, lang, ct.Snippet)
+		if ct.Ref != ct.File {
+			fmt.Fprintf(&b, "Cited as `%s`.\n", ct.Ref)
+		}
 	}
 	return b.String()
 }
