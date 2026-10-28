@@ -61,6 +61,7 @@ Everything generated is regenerated each run, so an unchanged service gives a ne
 
 - Golden evaluation set: expected facts and questions answered from the docs alone, scored automatically — measures *good*, not just *valid*.
 - MR mode: changed packages only, gate report and judge verdicts as an MR comment.
+- Cross-run cache: reuse judge verdicts (then annotations and pages) whose model, prompt and input hash are unchanged, saved only from committed runs and re-gated on reuse, so an unchanged service re-runs with near-zero model calls.
 - Monorepo scale: per-package fan-out, docs per service + index.
 - Contract tests: call the running service with spec-generated requests and compare responses.
 - OTel/Langfuse exporter on top of the JSONL trace.
