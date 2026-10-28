@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"autodoc/internal/llm"
+	"autodoc/internal/trace"
 )
 
 // Default model chains per provider, first choice first. Each step falls back
@@ -41,6 +42,9 @@ type Config struct {
 	MaxCalls    int      // model calls allowed per agent before it is stopped
 	TokenBudget int      // AUTODOC_TOKEN_BUDGET: tokens the whole run may use, every agent together; 0 means no limit
 	GitToken    string   // AUTODOC_GIT_TOKEN: when set, the run branch is pushed to the https origin with it
+	// AUTODOC_PRICES and AUTODOC_REFERENCE_PRICE: the price table for the
+	// trace's estimated cost. Models not in it count as free.
+	Pricing trace.Pricing
 }
 
 // Load reads .env in the working directory, if present, then the environment.
@@ -92,9 +96,53 @@ func Load() (Config, error) {
 		cfg.TokenBudget = n
 	}
 
+	pricing, err := loadPricing()
+	if err != nil {
+		return Config{}, err
+	}
+	cfg.Pricing = pricing
+
 	cfg.AgentModels = listOr("AUTODOC_AGENT_MODEL", agentDefault)
 	cfg.JudgeModels = listOr("AUTODOC_JUDGE_MODEL", judgeDefault)
 	return cfg, nil
+}
+
+// loadPricing reads AUTODOC_PRICES, comma-separated model=in/out entries in
+// USD per 1M tokens (e.g. "gemini-2.5-flash=0.30/2.50"), and
+// AUTODOC_REFERENCE_PRICE, one name=in/out entry that replaces the default
+// reference.
+func loadPricing() (trace.Pricing, error) {
+	p := trace.DefaultPricing()
+	parse := func(key, entry string) (string, trace.Price, error) {
+		name, price, ok := strings.Cut(entry, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			return "", trace.Price{}, fmt.Errorf("%s: %q is not model=in/out, such as gemini-2.5-flash=0.30/2.50", key, entry)
+		}
+		pr, err := trace.ParsePrice(price)
+		if err != nil {
+			return "", trace.Price{}, fmt.Errorf("%s: %s: %w", key, name, err)
+		}
+		return name, pr, nil
+	}
+	for _, entry := range listOr("AUTODOC_PRICES", nil) {
+		name, pr, err := parse("AUTODOC_PRICES", entry)
+		if err != nil {
+			return p, err
+		}
+		if p.Models == nil {
+			p.Models = map[string]trace.Price{}
+		}
+		p.Models[name] = pr
+	}
+	if s := strings.TrimSpace(os.Getenv("AUTODOC_REFERENCE_PRICE")); s != "" {
+		name, pr, err := parse("AUTODOC_REFERENCE_PRICE", s)
+		if err != nil {
+			return p, err
+		}
+		p.ReferenceName, p.Reference = name, pr
+	}
+	return p, nil
 }
 
 func strOr(key, fallback string) string {

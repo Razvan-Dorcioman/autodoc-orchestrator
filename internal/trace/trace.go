@@ -1,6 +1,6 @@
 // Package trace records a run as JSON lines: steps, tool calls, model calls,
-// retries and gate results, with token counts. Each run gets its own
-// directory holding trace.jsonl and, on Close, summary.json.
+// retries and gate results, with token counts and an estimated cost. Each run
+// gets its own directory holding trace.jsonl and, on Close, summary.json.
 package trace
 
 import (
@@ -47,6 +47,11 @@ type Event struct {
 	TotalTokens   int    `json:"total_tokens,omitempty"`
 	LatencyMS     int64  `json:"latency_ms,omitempty"`
 	FinishReason  string `json:"finish_reason,omitempty"`
+	// Estimated cost in USD from the price table (see Pricing): EstCostUSD
+	// at the model's own price, $0 for a free model, and RefCostUSD at the
+	// reference price. Set on model calls, and on run_end for the whole run.
+	EstCostUSD *float64 `json:"est_cost_usd,omitempty"`
+	RefCostUSD *float64 `json:"ref_cost_usd,omitempty"`
 
 	// Tool calls.
 	Tool        string         `json:"tool,omitempty"`
@@ -74,6 +79,7 @@ type Summary struct {
 	Error      string                 `json:"error,omitempty"`
 	Steps      []StepSummary          `json:"steps"`
 	Models     map[string]ModelTotals `json:"models"`
+	Cost       CostSummary            `json:"estimated_cost"`
 	Result     any                    `json:"result,omitempty"` // what the run left behind, from the pipeline
 }
 
@@ -88,10 +94,12 @@ type StepSummary struct {
 }
 
 type ModelTotals struct {
-	Calls        int `json:"calls"`
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	Calls        int     `json:"calls"`
+	InputTokens  int     `json:"input_tokens"`
+	OutputTokens int     `json:"output_tokens"`
+	TotalTokens  int     `json:"total_tokens"`
+	EstCostUSD   float64 `json:"est_cost_usd"`
+	RefCostUSD   float64 `json:"ref_cost_usd"`
 }
 
 // Totals counts the whole run.
@@ -121,6 +129,9 @@ type Recorder struct {
 	open      int // index in steps of the running step, or -1
 	opened    time.Time
 	models    map[string]ModelTotals
+	pricing   Pricing
+	estUSD    float64 // run totals, unrounded
+	refUSD    float64
 	status    string
 	result    any
 	failed    string // the step that failed and its error
@@ -142,13 +153,20 @@ func New(runsDir string) (*Recorder, error) {
 		return nil, fmt.Errorf("create trace: %w", err)
 	}
 	r := &Recorder{dir: dir, f: f, enc: json.NewEncoder(f), totals: Totals{RunID: id},
-		open: -1, models: map[string]ModelTotals{}, status: Incomplete}
+		open: -1, models: map[string]ModelTotals{}, pricing: DefaultPricing(), status: Incomplete}
 	r.Emit(Event{Type: RunStart})
 	return r, nil
 }
 
 func (r *Recorder) RunID() string { return r.totals.RunID }
 func (r *Recorder) Dir() string   { return r.dir }
+
+// SetPricing replaces DefaultPricing for the model calls recorded from now on.
+func (r *Recorder) SetPricing(p Pricing) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.pricing = p
+}
 
 // Emit stamps e with the time and a sequence number and appends it.
 // A failed write is not fatal to the run; it is reported once on Close.
@@ -159,6 +177,19 @@ func (r *Recorder) Emit(e Event) {
 	e.Seq = r.seq
 	if e.Time.IsZero() {
 		e.Time = time.Now().UTC()
+	}
+	if e.Type == ModelCall {
+		est, ref := r.pricing.cost(e.Model, e.InputTokens, e.OutputTokens+e.ThoughtTokens)
+		e.EstCostUSD, e.RefCostUSD = ptr(usd(est)), ptr(usd(ref))
+		r.estUSD += est
+		r.refUSD += ref
+		m := r.models[e.Model]
+		m.EstCostUSD += est
+		m.RefCostUSD += ref
+		r.models[e.Model] = m
+	}
+	if e.Type == RunEnd {
+		e.EstCostUSD, e.RefCostUSD = ptr(usd(r.estUSD)), ptr(usd(r.refUSD))
 	}
 	r.count(e)
 	_ = r.enc.Encode(e)
@@ -227,7 +258,12 @@ func (r *Recorder) Finish(status string, result any) {
 func (r *Recorder) Summary() Summary {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	s := Summary{Totals: r.totals, Status: r.status, Steps: slices.Clone(r.steps), Models: maps.Clone(r.models), Result: r.result}
+	s := Summary{Totals: r.totals, Status: r.status, Steps: slices.Clone(r.steps), Models: maps.Clone(r.models),
+		Cost: r.costSummary(), Result: r.result}
+	for k, m := range s.Models {
+		m.EstCostUSD, m.RefCostUSD = usd(m.EstCostUSD), usd(m.RefCostUSD)
+		s.Models[k] = m
+	}
 	if s.Status == Failed {
 		s.FailedStep, s.Error = r.failed, r.failedErr
 	}
@@ -246,6 +282,8 @@ func (r *Recorder) Close() error {
 	}
 	return r.f.Close()
 }
+
+func ptr(v float64) *float64 { return &v }
 
 // newRunID is sortable by time and unique enough for concurrent runs.
 func newRunID(now time.Time) (string, error) {

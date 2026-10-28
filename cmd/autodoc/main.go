@@ -79,9 +79,11 @@ func cmdRun(ctx context.Context, args []string) error {
 		return err
 	}
 	defer rec.Close()
+	rec.SetPricing(cfg.Pricing)
 	fmt.Println("run:", rec.RunID(), "trace:", rec.Dir())
 	res, err := pipeline.Run(ctx, cfg, rec, pipeline.Input{Repo: *repo, Main: *mainFile, RunTests: *runTests})
 	t := rec.Totals()
+	defer fmt.Println(costLine(rec.Summary().Cost))
 	defer fmt.Printf("model calls: %d, tool calls: %d (%d failed), tokens in/out/total: %d/%d/%d\n",
 		t.ModelCalls, t.ToolCalls, t.ToolErrors, t.InputTokens, t.OutputTokens, t.TotalTokens)
 	defer fmt.Println("status:", rec.Summary().Status, "summary:", filepath.Join(rec.Dir(), "summary.json"))
@@ -128,6 +130,7 @@ func cmdSmoke(ctx context.Context, args []string) error {
 		return err
 	}
 	defer rec.Close()
+	rec.SetPricing(cfg.Pricing)
 
 	answer, err := smoke.Run(ctx, cfg, rec, *dir)
 	if err != nil {
@@ -137,6 +140,13 @@ func cmdSmoke(ctx context.Context, args []string) error {
 	fmt.Printf("answer: %s\n", answer)
 	fmt.Printf("model calls: %d, tool calls: %d, tokens in/out/total: %d/%d/%d\n",
 		t.ModelCalls, t.ToolCalls, t.InputTokens, t.OutputTokens, t.TotalTokens)
+	fmt.Println(costLine(rec.Summary().Cost))
 	fmt.Println("trace:", rec.Dir())
 	return nil
+}
+
+// costLine is the estimated cost for the console; summary.json has the details.
+func costLine(c trace.CostSummary) string {
+	return fmt.Sprintf("estimated cost: $%.4f (free models count as $0); at the reference price (%s, %s): $%.4f",
+		c.USD, c.ReferenceModel, c.ReferencePrice, c.ReferenceUSD)
 }

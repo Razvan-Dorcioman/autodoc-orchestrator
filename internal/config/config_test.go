@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"autodoc/internal/llm"
+	"autodoc/internal/trace"
 )
 
 // clearEnv blanks every variable Load reads, so a developer's shell cannot leak in.
@@ -14,6 +15,7 @@ func clearEnv(t *testing.T) {
 	for _, k := range []string{
 		"AUTODOC_PROVIDER", "AUTODOC_LOCAL_URL", "AUTODOC_LOCAL_API_KEY", "AUTODOC_HTTP_TIMEOUT",
 		"AUTODOC_AGENT_MODEL", "AUTODOC_JUDGE_MODEL", "GOOGLE_API_KEY", "AUTODOC_TOKEN_BUDGET", "AUTODOC_GIT_TOKEN",
+		"AUTODOC_PRICES", "AUTODOC_REFERENCE_PRICE",
 	} {
 		t.Setenv(k, "")
 	}
@@ -85,6 +87,9 @@ func TestLoadRejectsBadSettings(t *testing.T) {
 		"zero timeout":     {"AUTODOC_HTTP_TIMEOUT": "0s"},
 		"bad budget":       {"AUTODOC_TOKEN_BUDGET": "1M"},
 		"negative budget":  {"AUTODOC_TOKEN_BUDGET": "-1"},
+		"price no model":   {"AUTODOC_PRICES": "1/2"},
+		"bad price":        {"AUTODOC_PRICES": "m=cheap"},
+		"bad reference":    {"AUTODOC_REFERENCE_PRICE": "=1/2"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			clearEnv(t)
@@ -95,5 +100,29 @@ func TestLoadRejectsBadSettings(t *testing.T) {
 				t.Error("want an error")
 			}
 		})
+	}
+}
+
+func TestLoadPricing(t *testing.T) {
+	clearEnv(t)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if def := trace.DefaultPricing(); len(cfg.Pricing.Models) != 0 || cfg.Pricing.ReferenceName != def.ReferenceName || cfg.Pricing.Reference != def.Reference {
+		t.Errorf("default pricing = %+v", cfg.Pricing)
+	}
+
+	t.Setenv("AUTODOC_PRICES", "a=0.3/2.5, b = 1/4,")
+	t.Setenv("AUTODOC_REFERENCE_PRICE", "big=3/15")
+	if cfg, err = Load(); err != nil {
+		t.Fatal(err)
+	}
+	p := cfg.Pricing
+	if len(p.Models) != 2 || p.Models["a"] != (trace.Price{InputPerM: 0.3, OutputPerM: 2.5}) || p.Models["b"] != (trace.Price{InputPerM: 1, OutputPerM: 4}) {
+		t.Errorf("models = %+v", p.Models)
+	}
+	if p.ReferenceName != "big" || p.Reference != (trace.Price{InputPerM: 3, OutputPerM: 15}) {
+		t.Errorf("reference = %s %+v", p.ReferenceName, p.Reference)
 	}
 }
