@@ -28,6 +28,7 @@ const (
 	Retry     = "retry"
 	Fallback  = "fallback"
 	Gate      = "gate"
+	Fixup     = "fixup" // a deterministic repair of agent output, such as a link rewritten as a citation
 )
 
 // Event is one line of trace.jsonl. Fields that do not apply to a type are omitted.

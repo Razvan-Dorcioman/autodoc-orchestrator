@@ -36,7 +36,7 @@ fetch ─► index ─► strip ─► SWAGGER AGENT ─► gate A ─► add ro
 | add route | det | Template-insert `GET /openapi.json` (see below); checked by the orchestrator (`route.json`), no test added to the repo | — |
 | reindex | det | Re-extract `facts.json` from the annotated copy (`facts_annotated.json`): the `// @` lines moved every line below them, and the docs, gate B and the judge cite and check current positions. The routes must be the same ones; only positions may change | — |
 | Docs agent | LLM | Eight `docs/` pages: overview, structure, request flow, API, business rules, errors, configuration, test & ship | `read_file`, `get_facts`, `get_spec`, `write_doc` (one page per turn) |
-| Gate B | det | See *Verification* | — |
+| Gate B | det | See *Verification*. Before each run, a Markdown link to repository code that does not resolve from `docs/` (`[index](internal/x.go:31)`) is rewritten as the citation it means (``index (`internal/x.go:31`)``), then checked like any other: models link code despite the instruction, and it isn't worth an attempt | — |
 | Judge | LLM | Split docs into claims; verify each against its cited code; unsupported claims go back to the docs agent once; the last pass is advisory | — (the cited code is in the message) |
 | commit | det | One commit by `autodoc` on `autodoc/<base-sha>`, after re-checking that every staged path is a non-test `.go` file, `internal/apispec/` or a docs page; nothing changed → no commit, status `unchanged`. With `AUTODOC_GIT_TOKEN`, push the branch to the https origin (token in an env-scoped `http.extraHeader`, never in args or `.git/config`; `--force-with-lease`, so a re-run replaces its own branch); a failed push keeps the local commit and fails the run. No MR is opened | git |
 

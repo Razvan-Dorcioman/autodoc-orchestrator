@@ -439,9 +439,18 @@ func document(ctx context.Context, cfg config.Config, rec *trace.Recorder, dir s
 		}
 		return nil
 	}
-	// gateB runs gate B until it is green, at most gateBAttempts times.
+	// gateB runs gate B until it is green, at most gateBAttempts times. Before
+	// each run, links to code become citations: a mechanical fix, not worth
+	// an attempt.
 	gateB := func() error {
 		for attempt := 1; ; attempt++ {
+			n, err := verify.RewriteCodeLinks(dir)
+			if err != nil {
+				return fmt.Errorf("rewrite links to code: %w", err)
+			}
+			if len(n) > 0 {
+				rec.Emit(trace.Event{Type: trace.Fixup, Step: "gate_b", Detail: verify.RewriteSummary(n)})
+			}
 			start := time.Now()
 			rep := verify.GateB(verify.GateBInput{Dir: dir, Facts: facts, Before: before})
 			if err := writeJSON(filepath.Join(rec.Dir(), "gate_b.json"), rep); err != nil {
