@@ -73,3 +73,11 @@ Each run gets `runs/<run-id>/` (or under `--runs-dir`); the command prints its p
 - `work/`: the target's working copy. The result is committed there on branch
   `autodoc/<base sha>`, then pushed to the target repo (see Run): annotations in the handlers, the spec in `internal/apispec/`
   (`swagger.json`, `swagger.yaml`), the route serving it, and the pages in `docs/`
+
+## Result of one run
+
+Run `20261029T145902Z-64ab1b` (local `qwen3:14b`, 16k context) against catalog-poc at `0538694`,
+pushed to a fork as branch
+[`autodoc/05386947ec4e`](https://github.com/Razvan-Dorcioman/catalog-poc/tree/autodoc/05386947ec4e).
+The fork's `main` is the original code, so the run's one commit reads as a diff:
+[main...autodoc/05386947ec4e](https://github.com/Razvan-Dorcioman/catalog-poc/compare/main...autodoc/05386947ec4e).
