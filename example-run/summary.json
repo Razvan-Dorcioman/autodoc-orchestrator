@@ -129,7 +129,7 @@
       "internal/httpapi/handlers.go",
       "internal/httpapi/router.go"
     ],
-    "pushed_to": "C:/Users/razva/dev/autodoc-orchestrator/../catalog-poc",
+    "pushed_to": "../catalog-poc",
     "work_dir": "runs\\20261029T145902Z-64ab1b\\work"
   }
 }

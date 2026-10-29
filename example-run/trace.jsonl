@@ -252,5 +252,5 @@
 {"ts":"2026-10-29T15:12:03.341909Z","seq":252,"type":"step_start","step":"commit"}
 {"ts":"2026-10-29T15:12:03.585719Z","seq":253,"type":"step_end","step":"commit","detail":"committed 14 files as bdbf1fce196b on autodoc/05386947ec4e"}
 {"ts":"2026-10-29T15:12:03.585719Z","seq":254,"type":"step_start","step":"push"}
-{"ts":"2026-10-29T15:12:03.9516706Z","seq":255,"type":"step_end","step":"push","detail":"pushed autodoc/05386947ec4e to C:/Users/razva/dev/autodoc-orchestrator/../catalog-poc"}
+{"ts":"2026-10-29T15:12:03.9516706Z","seq":255,"type":"step_end","step":"push","detail":"pushed autodoc/05386947ec4e to ../catalog-poc"}
 {"ts":"2026-10-29T15:12:03.9526739Z","seq":256,"type":"run_end","est_cost_usd":0,"ref_cost_usd":0.666198,"detail":"committed"}

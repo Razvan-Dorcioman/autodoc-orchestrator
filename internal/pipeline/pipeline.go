@@ -65,7 +65,7 @@ type Result struct {
 	SpecGaps  []verify.Issue  // param constraints gate A's last attempt still found missing or wrong, committed for review
 	Commit    string          // the run's commit on Repo.Branch; empty when nothing changed
 	Files     []string        // the paths it changed
-	PushedTo  string          // the target repo's URL or path, once the branch is pushed there
+	PushedTo  string          // the target repo's URL or path as given with --repo, once the branch is pushed there
 }
 
 // Outcome is what summary.json records of the result.
@@ -301,12 +301,13 @@ func run(ctx context.Context, cfg config.Config, rec *trace.Recorder, in Input) 
 	}
 	if push != nil {
 		err = step(rec, "push", func() (string, error) {
-			url, err := push()
-			if err != nil {
+			// Recorded as given with --repo: origin is the clone's absolute
+			// path, which would put this machine's layout in the trace.
+			if _, err := push(); err != nil {
 				return "", err
 			}
-			res.PushedTo = url
-			return fmt.Sprintf("pushed %s to %s", res.Repo.Branch, url), nil
+			res.PushedTo = res.Repo.Source
+			return fmt.Sprintf("pushed %s to %s", res.Repo.Branch, res.PushedTo), nil
 		})
 	}
 	return res, err
