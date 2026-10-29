@@ -1,0 +1,135 @@
+{
+  "run_id": "20261029T145902Z-64ab1b",
+  "model_calls": 110,
+  "tool_calls": 17,
+  "tool_errors": 0,
+  "retries": 3,
+  "fallbacks": 0,
+  "input_tokens": 243925,
+  "cached_tokens": 174247,
+  "output_tokens": 55732,
+  "thought_tokens": 0,
+  "total_tokens": 299657,
+  "status": "committed",
+  "steps": [
+    {
+      "name": "fetch",
+      "duration_ms": 227,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "baseline",
+      "duration_ms": 1943,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "index",
+      "duration_ms": 512,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "strip",
+      "duration_ms": 0,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "swagger",
+      "duration_ms": 53047,
+      "model_calls": 8,
+      "total_tokens": 47109,
+      "cached_tokens": 35838
+    },
+    {
+      "name": "add_route",
+      "duration_ms": 3665,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "reindex",
+      "duration_ms": 382,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "docs",
+      "duration_ms": 720918,
+      "model_calls": 102,
+      "total_tokens": 252548,
+      "cached_tokens": 138409
+    },
+    {
+      "name": "commit",
+      "duration_ms": 243,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    },
+    {
+      "name": "push",
+      "duration_ms": 365,
+      "model_calls": 0,
+      "total_tokens": 0,
+      "cached_tokens": 0
+    }
+  ],
+  "models": {
+    "qwen3-16k": {
+      "calls": 110,
+      "input_tokens": 243925,
+      "cached_tokens": 174247,
+      "output_tokens": 55732,
+      "total_tokens": 299657,
+      "est_cost_usd": 0,
+      "ref_cost_usd": 0.666198
+    }
+  },
+  "estimated_cost": {
+    "note": "estimate: recorded token counts times the configured price table (AUTODOC_PRICES); models not in it are counted as free; cached input is priced at the cached rate; thought tokens are priced as output; not a bill",
+    "usd": 0,
+    "reference_model": "gemini-2.5-pro",
+    "reference_price": {
+      "input_per_m": 1.25,
+      "cached_input_per_m": 0.125,
+      "output_per_m": 10
+    },
+    "reference_usd": 0.666198,
+    "free_models": [
+      "qwen3-16k"
+    ]
+  },
+  "result": {
+    "source": "../catalog-poc",
+    "base_sha": "05386947ec4ee977d5bb9ae93349731e021406f2",
+    "branch": "autodoc/05386947ec4e",
+    "commit": "bdbf1fce196baf7f23241738ce1a54209ec868dc",
+    "files": [
+      "cmd/server/main.go",
+      "docs/api.md",
+      "docs/business-rules.md",
+      "docs/configuration.md",
+      "docs/errors.md",
+      "docs/overview.md",
+      "docs/request-flow.md",
+      "docs/structure.md",
+      "docs/testing.md",
+      "internal/apispec/apispec.go",
+      "internal/apispec/swagger.json",
+      "internal/apispec/swagger.yaml",
+      "internal/httpapi/handlers.go",
+      "internal/httpapi/router.go"
+    ],
+    "pushed_to": "C:/Users/razva/dev/autodoc-orchestrator/../catalog-poc",
+    "work_dir": "runs\\20261029T145902Z-64ab1b\\work"
+  }
+}

@@ -81,3 +81,6 @@ pushed to a fork as branch
 [`autodoc/05386947ec4e`](https://github.com/Razvan-Dorcioman/catalog-poc/tree/autodoc/05386947ec4e).
 The fork's `main` is the original code, so the run's one commit reads as a diff:
 [main...autodoc/05386947ec4e](https://github.com/Razvan-Dorcioman/catalog-poc/compare/main...autodoc/05386947ec4e).
+Its trace is in [example-run/](example-run): [trace.jsonl](example-run/trace.jsonl) has every
+step, model call, tool call, gate, retry and fixup as it happened, and
+[summary.json](example-run/summary.json) has the totals (calls, tokens, estimated cost) per step and per model.
